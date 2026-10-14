@@ -29,17 +29,17 @@ from .model import ESPCN
 # Data layout
 # ---------------------------------------------------------------------------
 TRAIN_SOURCES = [
-    # (HR dir, LR dir, reserved-for-val fraction)
-    ("DIV2K/DIV2K_train_HR", "DIV2K/DIV2K_train_LR_unknown/X{scale}", 0.0),
-    ("Flickr2K/Flickr2K_HR", "Flickr2K/Flickr2K_LR_unknown/X{scale}", 0.05),
+    # (HR dir, LR dir template, reserved-for-val fraction)
+    ("DIV2K/DIV2K_train_HR", "DIV2K/DIV2K_train_LR_{lr_type}/X{scale}", 0.0),
+    ("Flickr2K/Flickr2K_HR", "Flickr2K/Flickr2K_LR_{lr_type}/X{scale}", 0.05),
 ]
 VAL_SOURCES = [
-    ("DIV2K/DIV2K_valid_HR", "DIV2K/DIV2K_valid_LR_unknown/X{scale}", 1.0),
+    ("DIV2K/DIV2K_valid_HR", "DIV2K/DIV2K_valid_LR_{lr_type}/X{scale}", 1.0),
 ]
 
 
-def _fmt(path: str, scale: int) -> str:
-    return path.format(scale=scale)
+def _fmt(path: str, scale: int, lr_type: str) -> str:
+    return path.format(scale=scale, lr_type=lr_type)
 
 
 def build_datasets(args: argparse.Namespace):
@@ -52,10 +52,13 @@ def build_datasets(args: argparse.Namespace):
 
     # Training sources (hold out a fraction of Flickr for validation).
     for hr_rel, lr_rel, val_frac in TRAIN_SOURCES:
-        pairs = collect_pairs(root / hr_rel, root / _fmt(lr_rel, args.scale), args.scale)
+        pairs = collect_pairs(
+            root / hr_rel, root / _fmt(lr_rel, args.scale, args.lr_type), args.scale
+        )
         if not pairs:
             raise FileNotFoundError(
-                f"No HR/LR pairs found for {hr_rel} / {_fmt(lr_rel, args.scale)}"
+                f"No HR/LR pairs found for {hr_rel} / "
+                f"{_fmt(lr_rel, args.scale, args.lr_type)}"
             )
         rng.shuffle(pairs)
         n_val = int(len(pairs) * val_frac)
@@ -64,10 +67,13 @@ def build_datasets(args: argparse.Namespace):
 
     # Dedicated validation sources (DIV2K valid).
     for hr_rel, lr_rel, _ in VAL_SOURCES:
-        pairs = collect_pairs(root / hr_rel, root / _fmt(lr_rel, args.scale), args.scale)
+        pairs = collect_pairs(
+            root / hr_rel, root / _fmt(lr_rel, args.scale, args.lr_type), args.scale
+        )
         if not pairs:
             raise FileNotFoundError(
-                f"No HR/LR pairs found for {hr_rel} / {_fmt(lr_rel, args.scale)}"
+                f"No HR/LR pairs found for {hr_rel} / "
+                f"{_fmt(lr_rel, args.scale, args.lr_type)}"
             )
         val_pairs.extend(pairs)
 
@@ -137,6 +143,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--data-root", type=str, default="data")
     p.add_argument("--output-dir", type=str, default="runs")
     p.add_argument("--scale", type=int, default=4, choices=[2, 3, 4, 8])
+    p.add_argument(
+        "--lr-type",
+        type=str,
+        default="bicubic",
+        choices=["bicubic", "unknown"],
+        help="bicubic = clean downscale (standard benchmark); unknown = realistic degradation",
+    )
     p.add_argument("--patch-size", type=int, default=128, help="HR patch size")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--epochs", type=int, default=100)
@@ -168,7 +181,10 @@ def main(argv=None) -> None:
         train_pairs = train_pairs[: args.max_train_items]
     if args.max_val_items > 0:
         val_pairs = val_pairs[: args.max_val_items]
-    print(f"train pairs: {len(train_pairs)} | val pairs: {len(val_pairs)}")
+    print(
+        f"lr type: {args.lr_type} | train pairs: {len(train_pairs)} | "
+        f"val pairs: {len(val_pairs)}"
+    )
 
     train_ds = SRTrainDataset(
         train_pairs,

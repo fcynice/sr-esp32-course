@@ -26,10 +26,12 @@ data/
 ├── DIV2K/
 │   ├── DIV2K_train_HR/                 # 800 张 HR (.jpeg)
 │   ├── DIV2K_valid_HR/                 # 100 张 HR (.jpeg)
+│   ├── DIV2K_train_LR_bicubic/X4/      # <stem>x4.png
 │   ├── DIV2K_train_LR_unknown/X4/      # <stem>x4.png
-│   └── DIV2K_valid_LR_unknown/X4/
+│   └── DIV2K_valid_LR_*/X4/
 └── Flickr2K/
     ├── Flickr2K_HR/                    # 2650 张 HR (.png)
+    ├── Flickr2K_LR_bicubic/X4/         # <stem>x4.png
     └── Flickr2K_LR_unknown/X4/         # <stem>x4.png
 ```
 
@@ -40,7 +42,21 @@ bash scripts/download_div2k.sh       # 下载 DIV2K
 bash scripts/download_div2k_lr.sh    # 下载 DIV2K 的 LR 归档 (bicubic + unknown)
 ```
 
-> 训练默认使用 **`LR_unknown`（真实退化）**，更贴近真实场景。LR 与 HR 严格整数倍对齐（HR = r × LR），dataset 切割时按同一空间位置对齐取块。
+> 训练默认使用 **`LR_bicubic`（干净下采样，标准超分基准）**，收敛更快、PSNR 更高，便于验证流程。
+> 也可用 `--lr-type unknown` 切换到 **真实退化** LR（含重度模糊），更贴近实际场景但难度高很多。
+> LR 与 HR 严格整数倍对齐（HR = r × LR），dataset 切割时按同一空间位置对齐取块。
+
+### bicubic vs unknown（实测参考）
+
+X4、相同网络与数据划分下的验证 PSNR：
+
+| LR 类型 | 训练量 | 验证 PSNR |
+|---|---|---|
+| `bicubic` | 3 epoch | **25.7 dB（仍在上升）** |
+| `unknown` | 42 epoch | 22.9 dB |
+
+`unknown` 的 LR 是重度模糊退化（其到 HR 的 MAE 约为 bicubic LR 的 2 倍），3 层小网络难以完全还原；
+即使对比 bicubic 上采样基线，模型也仅领先约 +0.9 dB。建议先用 `bicubic` 跑通，再尝试 `unknown` 或更大的网络。
 
 ### 数据划分
 
@@ -79,6 +95,7 @@ train-sr --scale 4 --epochs 100
 | `--data-root` | `data` | 数据集根目录 |
 | `--output-dir` | `runs` | 输出目录 |
 | `--scale` | `4` | 放大倍数（2/3/4/8） |
+| `--lr-type` | `bicubic` | LR 类型：`bicubic`（干净，推荐）或 `unknown`（真实退化） |
 | `--patch-size` | `128` | HR 训练块大小（须能被 scale 整除，对应 LR 32×32） |
 | `--batch-size` | `16` | 批大小 |
 | `--epochs` | `100` | 训练轮数 |
