@@ -43,21 +43,20 @@ def _fmt(path: str, scale: int, lr_type: str) -> str:
     return path.format(scale=scale, lr_type=lr_type)
 
 
-# Run directories are named ``espcn_x{scale}_{lr_type}_{index:02d}`` (e.g.
-# ``espcn_x4_unknown_01``).  The index is assigned chronologically per scale
-# (oldest run gets the smallest number); the wall-clock timestamp is stored
-# inside the run as ``run_info.json`` instead of the folder name.
-RUN_DIR_RE = re.compile(r"^espcn_x(?P<scale>\d+)_(?P<lr>[a-z]+)_(?P<idx>\d+)$")
+# Run directories are named ``res{index:02d}`` (e.g. ``res01``), assigned in
+# chronological order (oldest run gets the smallest number).  Details such as
+# the model, scale and lr_type live inside the run in ``run_info.json``.
+RUN_DIR_RE = re.compile(r"^res(?P<idx>\d+)$")
 
 
-def next_run_index(output_dir: str | Path, scale: int) -> int:
-    """Return the next free run index for the given scale."""
+def next_run_index(output_dir: str | Path) -> int:
+    """Return the next free run index under ``output_dir``."""
     base = Path(output_dir)
     max_idx = 0
     if base.is_dir():
         for p in base.iterdir():
             m = RUN_DIR_RE.match(p.name)
-            if m and p.is_dir() and int(m.group("scale")) == scale:
+            if m and p.is_dir():
                 max_idx = max(max_idx, int(m.group("idx")))
     return max_idx + 1
 
@@ -245,8 +244,8 @@ def main(argv=None) -> None:
 
     # Output directory + config snapshot.
     now = datetime.now()
-    index = next_run_index(args.output_dir, args.scale)
-    run_dir = Path(args.output_dir) / f"espcn_x{args.scale}_{args.lr_type}_{index:02d}"
+    index = next_run_index(args.output_dir)
+    run_dir = Path(args.output_dir) / f"res{index:02d}"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
     (run_dir / "run_info.json").write_text(

@@ -106,12 +106,12 @@ train-sr --scale 4 --epochs 100
 | `--no-augment` | — | 关闭翻转/旋转增强 |
 | `--no-amp` | — | 关闭混合精度 |
 
-训练产物保存在 `runs/espcn_x{scale}_{lr_type}_{序号}/`，序号按时间顺序递增（越早越小，两位补零）：
+训练产物保存在 `runs/res{序号}/`，序号按时间顺序递增（越早越小，两位补零）：
 
 ```
 runs/
-├── espcn_x4_unknown_01/
-└── espcn_x4_bicubic_02/
+├── res01/          # 最早的运行
+└── res02/
 ```
 
 每个运行目录包含：
@@ -121,11 +121,11 @@ runs/
 - `train_log.csv` — 每轮 loss / PSNR / 耗时
 - `last_val.txt` — 最近一次验证每张图的 PSNR
 - `args.json` — 本次运行的完整参数
-- `run_info.json` — 序号、时间戳、`lr_type`、scale 等元信息
+- `run_info.json` — 序号、时间戳、模型、scale、`lr_type` 等元信息
 
-`args.json` / `run_info.json` 会随 checkpoint 一起保存，推理时据此自动还原网络结构。
+目录名只保留 `resNN`，模型/放大倍数/LR 类型等信息都在 `run_info.json`（与 `args.json`）里；推理时据此自动还原网络结构。
 
-> 旧的 `espcn_x4_{时间戳}` 目录可用 `scripts/migrate_runs.py` 迁移到新的索引命名（时间戳会写入 `run_info.json`，并回填 `lr_type`）：
+> 旧的 `espcn_x4_{时间戳}` 或 `espcn_x4_unknown_01` 目录可用 `scripts/migrate_runs.py` 迁移到 `resNN` 命名（时间戳写入 `run_info.json`，并回填 `lr_type`）：
 >
 > ```bash
 > python scripts/migrate_runs.py runs --default-lr-type unknown
@@ -137,7 +137,7 @@ runs/
 
 ```bash
 .venv/bin/python -m superresolution.infer \
-  --checkpoint runs/espcn_x4_bicubic_02/best.pth \
+  --checkpoint runs/res02/best.pth \
   --input lr.png --output sr.png
 ```
 
@@ -145,7 +145,7 @@ runs/
 
 ```bash
 .venv/bin/python -m superresolution.infer \
-  --checkpoint runs/espcn_x4_bicubic_02/best.pth \
+  --checkpoint runs/res02/best.pth \
   --input lr_dir --output sr_dir
 ```
 
