@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import random
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,25 @@ VAL_SOURCES = [
 
 def _fmt(path: str, scale: int, lr_type: str) -> str:
     return path.format(scale=scale, lr_type=lr_type)
+
+
+# Run directories are named ``espcn_x{scale}_{lr_type}_{index:02d}`` (e.g.
+# ``espcn_x4_unknown_01``).  The index is assigned chronologically per scale
+# (oldest run gets the smallest number); the wall-clock timestamp is stored
+# inside the run as ``run_info.json`` instead of the folder name.
+RUN_DIR_RE = re.compile(r"^espcn_x(?P<scale>\d+)_(?P<lr>[a-z]+)_(?P<idx>\d+)$")
+
+
+def next_run_index(output_dir: str | Path, scale: int) -> int:
+    """Return the next free run index for the given scale."""
+    base = Path(output_dir)
+    max_idx = 0
+    if base.is_dir():
+        for p in base.iterdir():
+            m = RUN_DIR_RE.match(p.name)
+            if m and p.is_dir() and int(m.group("scale")) == scale:
+                max_idx = max(max_idx, int(m.group("idx")))
+    return max_idx + 1
 
 
 def build_datasets(args: argparse.Namespace):
@@ -224,10 +244,24 @@ def main(argv=None) -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     # Output directory + config snapshot.
-    tag = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = Path(args.output_dir) / f"espcn_x{args.scale}_{tag}"
+    now = datetime.now()
+    index = next_run_index(args.output_dir, args.scale)
+    run_dir = Path(args.output_dir) / f"espcn_x{args.scale}_{args.lr_type}_{index:02d}"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
+    (run_dir / "run_info.json").write_text(
+        json.dumps(
+            {
+                "index": index,
+                "timestamp": now.isoformat(timespec="seconds"),
+                "lr_type": args.lr_type,
+                "scale": args.scale,
+                "model": "espcn",
+            },
+            indent=2,
+        )
+    )
+    print(f"run dir: {run_dir}")
     log_path = run_dir / "train_log.csv"
     with log_path.open("w", newline="") as f:
         csv.writer(f).writerow(["epoch", "lr", "train_l1", "val_psnr", "seconds"])

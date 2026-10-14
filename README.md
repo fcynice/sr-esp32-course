@@ -106,15 +106,30 @@ train-sr --scale 4 --epochs 100
 | `--no-augment` | — | 关闭翻转/旋转增强 |
 | `--no-amp` | — | 关闭混合精度 |
 
-训练产物保存在 `runs/espcn_x{scale}_{时间戳}/`：
+训练产物保存在 `runs/espcn_x{scale}_{lr_type}_{序号}/`，序号按时间顺序递增（越早越小，两位补零）：
+
+```
+runs/
+├── espcn_x4_unknown_01/
+└── espcn_x4_bicubic_02/
+```
+
+每个运行目录包含：
 
 - `best.pth` — 验证 PSNR 最优权重
 - `last.pth` — 最新权重
 - `train_log.csv` — 每轮 loss / PSNR / 耗时
 - `last_val.txt` — 最近一次验证每张图的 PSNR
 - `args.json` — 本次运行的完整参数
+- `run_info.json` — 序号、时间戳、`lr_type`、scale 等元信息
 
-`args.json` 会随 checkpoint 一起保存，推理时据此自动还原网络结构。
+`args.json` / `run_info.json` 会随 checkpoint 一起保存，推理时据此自动还原网络结构。
+
+> 旧的 `espcn_x4_{时间戳}` 目录可用 `scripts/migrate_runs.py` 迁移到新的索引命名（时间戳会写入 `run_info.json`，并回填 `lr_type`）：
+>
+> ```bash
+> python scripts/migrate_runs.py runs --default-lr-type unknown
+> ```
 
 ## 推理
 
@@ -122,7 +137,7 @@ train-sr --scale 4 --epochs 100
 
 ```bash
 .venv/bin/python -m superresolution.infer \
-  --checkpoint runs/espcn_x4_xxx/best.pth \
+  --checkpoint runs/espcn_x4_bicubic_02/best.pth \
   --input lr.png --output sr.png
 ```
 
@@ -130,7 +145,7 @@ train-sr --scale 4 --epochs 100
 
 ```bash
 .venv/bin/python -m superresolution.infer \
-  --checkpoint runs/espcn_x4_xxx/best.pth \
+  --checkpoint runs/espcn_x4_bicubic_02/best.pth \
   --input lr_dir --output sr_dir
 ```
 
@@ -161,5 +176,5 @@ src/superresolution/
 ├── dataset.py    # 对齐切割的数据集 + 数据加载
 ├── train.py      # 训练 / 验证
 └── infer.py      # 推理
-scripts/          # 数据集下载脚本
+scripts/          # 数据集下载脚本 + runs 目录迁移脚本
 ```
