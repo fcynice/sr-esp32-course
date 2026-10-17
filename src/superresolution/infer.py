@@ -22,19 +22,27 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .model import ESPCN
+from .model import build_model, model_kwargs_for
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
 
-def load_model(checkpoint: str | Path, device: torch.device) -> ESPCN:
+def load_model(checkpoint: str | Path, device: torch.device):
+    """Rebuild a model from a self-describing checkpoint.
+
+    New checkpoints store ``model_name`` / ``model_kwargs``.  Older checkpoints
+    (before the registry existed) are treated as ESPCN.
+    """
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
-    args = ckpt.get("args", {})
-    model = ESPCN(
-        scale=args.get("scale", 4),
-        mid1=args.get("mid1", 64),
-        mid2=args.get("mid2", 32),
-    )
+    model_name = ckpt.get("model_name")
+    model_kwargs = ckpt.get("model_kwargs")
+    if model_name is None:
+        model_name = "espcn"
+        model_kwargs = model_kwargs_for("espcn", ckpt.get("args", {}))
+    elif model_kwargs is None:
+        model_kwargs = model_kwargs_for(model_name, ckpt.get("args", {}))
+
+    model = build_model(model_name, **model_kwargs)
     model.load_state_dict(ckpt["model"])
     model.eval().to(device)
     return model
@@ -42,7 +50,7 @@ def load_model(checkpoint: str | Path, device: torch.device) -> ESPCN:
 
 @torch.inference_mode()
 def super_resolve(
-    model: ESPCN,
+    model: torch.nn.Module,
     img: Image.Image,
     device: torch.device,
     tile: int = 0,

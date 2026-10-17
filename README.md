@@ -1,8 +1,13 @@
-# Super-Resolution (ESPCN + PixelShuffle)
+# Super-Resolution (ESPCN / EDSR + PixelShuffle)
 
-基于 PyTorch 的图像超分辨率项目。网络采用 ESPCN 风格结构：**三个卷积层 + 一个亚像素上采样层（`nn.PixelShuffle`）**，在 DIV2K 与 Flickr2K 数据集上训练。
+基于 PyTorch 的图像超分辨率项目，提供两种结构（均使用亚像素上采样 `nn.PixelShuffle`），在 DIV2K 与 Flickr2K 上训练：
+
+- **`edsr`（默认，推荐）**：残差网络 + PixelShuffle，默认 128 通道 / 32 残差块，约 **10.78M** 参数。
+- **`espcn`**：3 个卷积层 + PixelShuffle，约 37K 参数；保留用于兼容旧的 res01/res02 checkpoint。
 
 ## 网络结构
+
+### ESPCN
 
 RGB 输入、放大倍数 `r`（默认 4）：
 
@@ -15,7 +20,30 @@ RGB 输入、放大倍数 `r`（默认 4）：
 
 - 最后一层不接激活，输出 `3·r²` 个通道，由 `PixelShuffle` 重排为 `r×r` 的空间块，完成上采样。
 - X4 时 48 通道 → 3 通道，参数量约 37K。
-- 通道数可通过 `--mid1` / `--mid2` 调整（如 `--mid2 64` 得到对称的 64→64→48）。
+- 通道数可通过 `--mid1` / `--mid2` 调整。
+
+### EDSR-lite（推荐）
+
+特征提取全部在低分辨率空间完成，最后再上采样：
+
+```
+head  Conv3x3        3 -> C
+body  N x ResidualBlock(C)          # x + 0.1 * conv2(relu(conv1(x)))
+fuse  conv_after(body) + head       # 全局残差（LR 空间）
+up    [Conv3x3 C -> C*4, PixelShuffle(2)] x log2(r)
+tail  Conv3x3        C -> 3
+```
+
+- 无 BatchNorm；残差分支乘 `0.1`，避免深层堆叠时数值爆炸。
+- 默认 `C=128, N=32` → **10.78M** 参数；可用 `--channels` / `--n-blocks` 调整。
+- 显存实测（RTX 5070 8GB，patch 192、batch 16）：训练峰值约 **1.2 GB**，整图验证约 1.8 GB。
+
+### 模型对比（bicubic X4，实测）
+
+| 模型 | 参数量 | 5 epoch PSNR | 备注 |
+|---|---|---|---|
+| `espcn` | 37K | 26.2 dB | 100 epoch 收敛到 27.6 dB |
+| `edsr` 128/32 | 10.8M | **27.3 dB** | 仍在上升，收敛更快 |
 
 ## 数据准备
 
@@ -78,14 +106,19 @@ uv sync        # 或已就绪的 .venv
 ## 训练
 
 ```bash
+# 推荐：EDSR 128 通道 / 32 残差块（默认配置）
 .venv/bin/python -m superresolution.train \
-  --scale 4 --patch-size 128 --batch-size 16 --epochs 100
+  --model edsr --patch-size 192 --batch-size 16 --epochs 150
+
+# 轻量：ESPCN
+.venv/bin/python -m superresolution.train \
+  --model espcn --patch-size 128 --epochs 100
 ```
 
 或使用安装的命令：
 
 ```bash
-train-sr --scale 4 --epochs 100
+train-sr --model edsr --epochs 150
 ```
 
 主要参数：
@@ -94,13 +127,16 @@ train-sr --scale 4 --epochs 100
 |---|---|---|
 | `--data-root` | `data` | 数据集根目录 |
 | `--output-dir` | `runs` | 输出目录 |
+| `--model` | `edsr` | `espcn` 或 `edsr` |
 | `--scale` | `4` | 放大倍数（2/3/4/8） |
 | `--lr-type` | `bicubic` | LR 类型：`bicubic`（干净，推荐）或 `unknown`（真实退化） |
-| `--patch-size` | `128` | HR 训练块大小（须能被 scale 整除，对应 LR 32×32） |
+| `--patch-size` | `192` | HR 训练块大小（须能被 scale 整除，X4 对应 LR 48×48） |
 | `--batch-size` | `16` | 批大小 |
 | `--epochs` | `100` | 训练轮数 |
-| `--lr` | `1e-3` | 初始学习率（Adam + CosineAnnealing） |
-| `--mid1` / `--mid2` | `64` / `32` | 中间层通道数 |
+| `--lr` | `2e-4`(edsr) / `1e-3`(espcn) | 初始学习率（Adam + CosineAnnealing） |
+| `--channels` | `128` | EDSR body 通道数 |
+| `--n-blocks` | `32` | EDSR 残差块数 |
+| `--mid1` / `--mid2` | `64` / `32` | ESPCN 中间层通道数 |
 | `--val-every` | `5` | 每多少 epoch 验证一次 |
 | `--num-workers` | `4` | DataLoader 线程数 |
 | `--no-augment` | — | 关闭翻转/旋转增强 |
@@ -123,7 +159,9 @@ runs/
 - `args.json` — 本次运行的完整参数
 - `run_info.json` — 序号、时间戳、模型、scale、`lr_type` 等元信息
 
-目录名只保留 `resNN`，模型/放大倍数/LR 类型等信息都在 `run_info.json`（与 `args.json`）里；推理时据此自动还原网络结构。
+目录名只保留 `resNN`，模型/放大倍数/LR 类型等信息都在 `run_info.json`（与 `args.json`）里。
+
+checkpoint（`best.pth` / `last.pth`）是**自描述**的，内部保存了 `model_name` 与 `model_kwargs`，推理时自动重建对应网络结构（ESPCN 或 EDSR）。**旧 checkpoint（如 res01/res02）没有这些字段，会自动回退为 ESPCN**，仍然可以正常推理。
 
 > 旧的 `espcn_x4_{时间戳}` 或 `espcn_x4_unknown_01` 目录可用 `scripts/migrate_runs.py` 迁移到 `resNN` 命名（时间戳写入 `run_info.json`，并回填 `lr_type`）：
 >

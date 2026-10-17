@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .dataset import SRTrainDataset, SRValDataset, collect_pairs
-from .model import ESPCN
+from .model import build_model, model_kwargs_for
 
 # ---------------------------------------------------------------------------
 # Data layout
@@ -158,10 +158,17 @@ def validate(model, loader, device, use_amp):
 # Main
 # ---------------------------------------------------------------------------
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train ESPCN super-resolution model")
+    p = argparse.ArgumentParser(description="Train a super-resolution model")
     p.add_argument("--data-root", type=str, default="data")
     p.add_argument("--output-dir", type=str, default="runs")
     p.add_argument("--scale", type=int, default=4, choices=[2, 3, 4, 8])
+    p.add_argument(
+        "--model",
+        type=str,
+        default="edsr",
+        choices=["espcn", "edsr"],
+        help="espcn (small, 3 conv + PixelShuffle) or edsr (residual, larger)",
+    )
     p.add_argument(
         "--lr-type",
         type=str,
@@ -169,12 +176,19 @@ def parse_args(argv=None) -> argparse.Namespace:
         choices=["bicubic", "unknown"],
         help="bicubic = clean downscale (standard benchmark); unknown = realistic degradation",
     )
-    p.add_argument("--patch-size", type=int, default=128, help="HR patch size")
+    p.add_argument("--patch-size", type=int, default=192, help="HR patch size")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--epochs", type=int, default=100)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--mid1", type=int, default=64)
-    p.add_argument("--mid2", type=int, default=32)
+    p.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="initial learning rate (default: 1e-3 for espcn, 2e-4 for edsr)",
+    )
+    p.add_argument("--channels", type=int, default=128, help="EDSR body channels")
+    p.add_argument("--n-blocks", type=int, default=32, help="EDSR residual blocks")
+    p.add_argument("--mid1", type=int, default=64, help="ESPCN conv1 channels")
+    p.add_argument("--mid2", type=int, default=32, help="ESPCN conv2 channels")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--val-every", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
@@ -188,6 +202,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+
+    if args.lr is None:
+        args.lr = 1e-3 if args.model == "espcn" else 2e-4
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -231,8 +248,10 @@ def main(argv=None) -> None:
         pin_memory=True,
     )
 
-    model = ESPCN(scale=args.scale, mid1=args.mid1, mid2=args.mid2).to(device)
+    arch_kwargs = model_kwargs_for(args.model, args)
+    model = build_model(args.model, **arch_kwargs).to(device)
     n_params = sum(p.numel() for p in model.parameters())
+    print(f"model: {args.model} {arch_kwargs}")
     print(f"model params: {n_params:,}")
 
     criterion = nn.L1Loss()
@@ -255,7 +274,8 @@ def main(argv=None) -> None:
                 "timestamp": now.isoformat(timespec="seconds"),
                 "lr_type": args.lr_type,
                 "scale": args.scale,
-                "model": "espcn",
+                "model": args.model,
+                "model_kwargs": arch_kwargs,
             },
             indent=2,
         )
@@ -266,6 +286,17 @@ def main(argv=None) -> None:
         csv.writer(f).writerow(["epoch", "lr", "train_l1", "val_psnr", "seconds"])
 
     best_psnr = -1.0
+
+    def make_checkpoint(epoch: int, psnr_value: float) -> dict:
+        return {
+            "model": model.state_dict(),
+            "model_name": args.model,
+            "model_kwargs": arch_kwargs,
+            "args": vars(args),
+            "epoch": epoch,
+            "psnr": psnr_value,
+        }
+
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         train_loss = train_one_epoch(
@@ -278,28 +309,12 @@ def main(argv=None) -> None:
             val_psnr, per_image = validate(model, val_loader, device, use_amp)
             if val_psnr > best_psnr:
                 best_psnr = val_psnr
-                torch.save(
-                    {
-                        "model": model.state_dict(),
-                        "args": vars(args),
-                        "epoch": epoch,
-                        "psnr": best_psnr,
-                    },
-                    run_dir / "best.pth",
-                )
+                torch.save(make_checkpoint(epoch, best_psnr), run_dir / "best.pth")
             (run_dir / "last_val.txt").write_text(
                 "\n".join(f"{n}\t{p:.4f}" for n, p in per_image)
             )
 
-        torch.save(
-            {
-                "model": model.state_dict(),
-                "args": vars(args),
-                "epoch": epoch,
-                "psnr": best_psnr,
-            },
-            run_dir / "last.pth",
-        )
+        torch.save(make_checkpoint(epoch, best_psnr), run_dir / "last.pth")
 
         dt = time.time() - t0
         cur_lr = scheduler.get_last_lr()[0]
