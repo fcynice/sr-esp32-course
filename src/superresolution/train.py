@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import random
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -197,11 +199,62 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--max-train-items", type=int, default=0, help="debug: cap train set")
     p.add_argument("--max-val-items", type=int, default=0, help="debug: cap val set")
+    p.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="run directory or checkpoint to resume in-place (uses last.pth)",
+    )
     return p.parse_args(argv)
 
 
+def resolve_resume(path_str: str, output_dir: str | Path) -> tuple[Path, Path]:
+    """Resolve ``--resume`` to ``(run_dir, checkpoint_path)``."""
+    p = Path(path_str)
+    if not p.exists():
+        alt = Path(output_dir) / path_str
+        if alt.exists():
+            p = alt
+        else:
+            raise FileNotFoundError(f"resume target not found: {path_str}")
+    if p.is_dir():
+        return p, p / "last.pth"
+    return p.parent, p
+
+
 def main(argv=None) -> None:
-    args = parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parsed = parse_args(raw_argv)
+
+    resume_ckpt = None
+    run_dir: Path | None = None
+    if parsed.resume:
+        run_dir, ckpt_path = resolve_resume(parsed.resume, parsed.output_dir)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
+        resume_ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+        # Restore the original run configuration. Only runtime options and an
+        # explicitly-provided --epochs (to extend training) are overridden.
+        saved = dict(resume_ckpt.get("args", {}))
+        for k, v in vars(parsed).items():
+            saved.setdefault(k, v)
+        if "model" not in saved:
+            saved["model"] = resume_ckpt.get("model_name", "espcn")
+        model_kw = resume_ckpt.get("model_kwargs") or {}
+        for k in ("scale", "mid1", "mid2", "channels", "n_blocks"):
+            if k in model_kw:
+                saved.setdefault(k, model_kw[k])
+        explicit_epochs = any(
+            a == "--epochs" or a.startswith("--epochs=") for a in raw_argv
+        )
+        if explicit_epochs:
+            saved["epochs"] = parsed.epochs
+        saved["device"] = parsed.device
+        saved["num_workers"] = parsed.num_workers
+        args = argparse.Namespace(**saved)
+    else:
+        args = parsed
 
     if args.lr is None:
         args.lr = 1e-3 if args.model == "espcn" else 2e-4
@@ -263,31 +316,63 @@ def main(argv=None) -> None:
 
     # Output directory + config snapshot.
     now = datetime.now()
-    index = next_run_index(args.output_dir)
-    run_dir = Path(args.output_dir) / f"res{index:02d}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
-    (run_dir / "run_info.json").write_text(
-        json.dumps(
-            {
-                "index": index,
-                "timestamp": now.isoformat(timespec="seconds"),
-                "lr_type": args.lr_type,
-                "scale": args.scale,
-                "model": args.model,
-                "model_kwargs": arch_kwargs,
-            },
-            indent=2,
+    if run_dir is None:
+        index = next_run_index(args.output_dir)
+        run_dir = Path(args.output_dir) / f"res{index:02d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run_info.json").write_text(
+            json.dumps(
+                {
+                    "index": index,
+                    "timestamp": now.isoformat(timespec="seconds"),
+                    "lr_type": args.lr_type,
+                    "scale": args.scale,
+                    "model": args.model,
+                    "model_kwargs": arch_kwargs,
+                },
+                indent=2,
+            )
         )
-    )
+    else:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
     print(f"run dir: {run_dir}")
+
     log_path = run_dir / "train_log.csv"
-    with log_path.open("w", newline="") as f:
-        csv.writer(f).writerow(["epoch", "lr", "train_l1", "val_psnr", "seconds"])
+    if resume_ckpt is None or not log_path.exists():
+        with log_path.open("w", newline="") as f:
+            csv.writer(f).writerow(["epoch", "lr", "train_l1", "val_psnr", "seconds"])
 
     best_psnr = -1.0
+    start_epoch = 1
+    if resume_ckpt is not None:
+        model.load_state_dict(resume_ckpt["model"])
+        if "optimizer" in resume_ckpt:
+            optimizer.load_state_dict(resume_ckpt["optimizer"])
+        else:
+            print("warning: no optimizer state in checkpoint; optimizer restarted")
+        if "scaler" in resume_ckpt:
+            scaler.load_state_dict(resume_ckpt["scaler"])
 
-    def make_checkpoint(epoch: int, psnr_value: float) -> dict:
+        start_epoch = int(resume_ckpt.get("epoch", 0)) + 1
+        best_psnr = float(resume_ckpt.get("psnr", -1.0))
+        # CosineAnnealingLR is incremental, so jumping last_epoch directly
+        # would produce a wrong LR. Place the scheduler at the last completed
+        # epoch and set the upcoming epoch's LR from the cosine formula.
+        scheduler.last_epoch = start_epoch - 1
+        eta_min = args.lr * 0.01
+        lr_now = eta_min + (args.lr - eta_min) * 0.5 * (
+            1.0 + math.cos(math.pi * (start_epoch - 1) / max(1, args.epochs))
+        )
+        for group in optimizer.param_groups:
+            group["lr"] = lr_now
+        print(
+            f"resuming {run_dir.name} from epoch {start_epoch} "
+            f"(best PSNR {best_psnr:.3f}, lr {lr_now:.2e}, "
+            f"total epochs {args.epochs})"
+        )
+
+    def make_checkpoint(epoch: int, psnr_value: float, partial: bool = False) -> dict:
         return {
             "model": model.state_dict(),
             "model_name": args.model,
@@ -295,39 +380,50 @@ def main(argv=None) -> None:
             "args": vars(args),
             "epoch": epoch,
             "psnr": psnr_value,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
+            "partial": partial,
         }
 
-    for epoch in range(1, args.epochs + 1):
-        t0 = time.time()
-        train_loss = train_one_epoch(
-            model, train_loader, criterion, optimizer, scaler, device, use_amp, epoch, args.epochs
-        )
-        scheduler.step()
-
-        val_psnr = None
-        if epoch % args.val_every == 0 or epoch == args.epochs:
-            val_psnr, per_image = validate(model, val_loader, device, use_amp)
-            if val_psnr > best_psnr:
-                best_psnr = val_psnr
-                torch.save(make_checkpoint(epoch, best_psnr), run_dir / "best.pth")
-            (run_dir / "last_val.txt").write_text(
-                "\n".join(f"{n}\t{p:.4f}" for n, p in per_image)
+    epoch = start_epoch - 1
+    try:
+        for epoch in range(start_epoch, args.epochs + 1):
+            t0 = time.time()
+            train_loss = train_one_epoch(
+                model, train_loader, criterion, optimizer, scaler, device, use_amp, epoch, args.epochs
             )
+            scheduler.step()
 
-        torch.save(make_checkpoint(epoch, best_psnr), run_dir / "last.pth")
+            val_psnr = None
+            if epoch % args.val_every == 0 or epoch == args.epochs:
+                val_psnr, per_image = validate(model, val_loader, device, use_amp)
+                if val_psnr > best_psnr:
+                    best_psnr = val_psnr
+                    torch.save(make_checkpoint(epoch, best_psnr), run_dir / "best.pth")
+                (run_dir / "last_val.txt").write_text(
+                    "\n".join(f"{n}\t{p:.4f}" for n, p in per_image)
+                )
 
-        dt = time.time() - t0
-        cur_lr = scheduler.get_last_lr()[0]
-        msg = f"[{epoch:3d}/{args.epochs}] l1={train_loss:.5f} lr={cur_lr:.2e}"
-        if val_psnr is not None:
-            msg += f" val_psnr={val_psnr:.3f} (best {best_psnr:.3f})"
-        msg += f" {dt:.1f}s"
-        print(msg)
-        with log_path.open("a", newline="") as f:
-            csv.writer(f).writerow(
-                [epoch, f"{cur_lr:.6g}", f"{train_loss:.6f}",
-                 "" if val_psnr is None else f"{val_psnr:.4f}", f"{dt:.2f}"]
-            )
+            torch.save(make_checkpoint(epoch, best_psnr), run_dir / "last.pth")
+
+            dt = time.time() - t0
+            cur_lr = scheduler.get_last_lr()[0]
+            msg = f"[{epoch:3d}/{args.epochs}] l1={train_loss:.5f} lr={cur_lr:.2e}"
+            if val_psnr is not None:
+                msg += f" val_psnr={val_psnr:.3f} (best {best_psnr:.3f})"
+            msg += f" {dt:.1f}s"
+            print(msg)
+            with log_path.open("a", newline="") as f:
+                csv.writer(f).writerow(
+                    [epoch, f"{cur_lr:.6g}", f"{train_loss:.6f}",
+                     "" if val_psnr is None else f"{val_psnr:.4f}", f"{dt:.2f}"]
+                )
+    except KeyboardInterrupt:
+        torch.save(make_checkpoint(epoch, best_psnr, partial=True), run_dir / "last.pth")
+        print(f"\ninterrupted at epoch {epoch}; saved {run_dir / 'last.pth'}")
+        print(f"resume with: python -m superresolution.train --resume {run_dir}")
+        return
 
     print(f"done. run dir: {run_dir} | best PSNR: {best_psnr:.3f}")
 
