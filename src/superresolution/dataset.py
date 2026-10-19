@@ -56,6 +56,51 @@ def _load_rgb(path: Path) -> Image.Image:
     return Image.open(path).convert("RGB")
 
 
+def lr_type_of(path: str | Path) -> str:
+    """Infer the LR variant (``bicubic`` / ``unknown``) from a LR file path."""
+    for parent in Path(path).parents:
+        name = parent.name.lower()
+        if "bicubic" in name:
+            return "bicubic"
+        if "unknown" in name:
+            return "unknown"
+    return ""
+
+
+def collect_hr_items(
+    hr_dir: str | Path,
+    lr_dirs: dict[str, str | Path],
+    scale: int,
+    exts: Iterable[str] = IMG_EXTS,
+) -> list[tuple[Path, dict[str, Path]]]:
+    """Group each HR file with all of its available LR variants.
+
+    ``lr_dirs`` maps a LR type (e.g. ``"bicubic"``) to its directory.  Returns
+    ``(hr_path, {lr_type: lr_path})`` entries; HR files without any matching LR
+    are skipped.  A missing variant is simply omitted from the inner dict.
+    """
+    hr_dir = Path(hr_dir)
+    lr_dirs = {k: Path(v) for k, v in lr_dirs.items()}
+    exts = {e.lower() for e in exts}
+
+    items: list[tuple[Path, dict[str, Path]]] = []
+    for hr in sorted(hr_dir.iterdir()):
+        if not hr.is_file() or hr.suffix.lower() not in exts:
+            continue
+        lrs: dict[str, Path] = {}
+        for lr_type, lr_dir in lr_dirs.items():
+            candidate = lr_dir / f"{hr.stem}x{scale}.png"
+            if candidate.exists():
+                lrs[lr_type] = candidate
+            else:
+                matches = list(lr_dir.glob(f"{hr.stem}x{scale}.*"))
+                if matches:
+                    lrs[lr_type] = matches[0]
+        if lrs:
+            items.append((hr, lrs))
+    return items
+
+
 class SRTrainDataset(Dataset):
     """Random aligned patch pairs for training."""
 
@@ -137,6 +182,61 @@ class SRTrainDataset(Dataset):
         return lr_t, hr_t
 
 
+class SRMixTrainDataset(SRTrainDataset):
+    """Training dataset with random LR-variant selection per access.
+
+    ``groups`` is a list of ``(hr_path, {lr_type: lr_path})``.  Each HR is
+    exposed ``repeats`` times per epoch, and every access picks one of its
+    available LR variants at random.  The same HR can therefore be seen with
+    two different LR types within one epoch, but this is *not guaranteed*.
+    """
+
+    def __init__(
+        self,
+        groups,
+        scale: int = 4,
+        patch_size: int = 192,
+        augment: bool = True,
+        seed: int | None = None,
+        repeats: int = 2,
+    ) -> None:
+        super().__init__(
+            [],
+            scale=scale,
+            patch_size=patch_size,
+            augment=augment,
+            seed=seed,
+        )
+        if repeats < 1:
+            raise ValueError("repeats must be >= 1")
+        self.groups = list(groups)
+        self.repeats = repeats
+
+    def __len__(self) -> int:
+        return len(self.groups) * self.repeats
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        hr_path, lrs = self.groups[idx % len(self.groups)]
+        lr_path = lrs[self.rng.choice(tuple(lrs.keys()))]
+
+        hr = _load_rgb(hr_path)
+        lr = _load_rgb(lr_path)
+
+        # Keep the region of HR that the LR actually covers (alignment guard).
+        lw, lh = lr.size
+        ew, eh = lw * self.scale, lh * self.scale
+        if hr.size != (ew, eh):
+            hr = hr.crop((0, 0, ew, eh))
+
+        hr_patch, lr_patch = self._crop(hr, lr)
+        if self.augment:
+            hr_patch, lr_patch = self._augment(hr_patch, lr_patch)
+
+        lr_t = torch.from_numpy(_to_numpy(lr_patch)).permute(2, 0, 1).float() / 255.0
+        hr_t = torch.from_numpy(_to_numpy(hr_patch)).permute(2, 0, 1).float() / 255.0
+        return lr_t, hr_t
+
+
 class SRValDataset(Dataset):
     """Full-image pairs for validation.
 
@@ -163,7 +263,9 @@ class SRValDataset(Dataset):
 
         lr_t = torch.from_numpy(_to_numpy(lr)).permute(2, 0, 1).float() / 255.0
         hr_t = torch.from_numpy(_to_numpy(hr)).permute(2, 0, 1).float() / 255.0
-        return lr_t, hr_t, hr_path.name
+        lr_type = lr_type_of(lr_path)
+        name = f"{lr_type}/{hr_path.name}" if lr_type else hr_path.name
+        return lr_t, hr_t, name
 
 
 def _to_numpy(img: Image.Image):

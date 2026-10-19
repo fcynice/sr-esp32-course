@@ -25,7 +25,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .dataset import SRTrainDataset, SRValDataset, collect_pairs
+from .dataset import (
+    SRMixTrainDataset,
+    SRValDataset,
+    collect_hr_items,
+    lr_type_of,
+)
 from .model import build_model, model_kwargs_for
 
 # ---------------------------------------------------------------------------
@@ -43,6 +48,11 @@ VAL_SOURCES = [
 
 def _fmt(path: str, scale: int, lr_type: str) -> str:
     return path.format(scale=scale, lr_type=lr_type)
+
+
+def requested_types(lr_type: str) -> tuple[str, ...]:
+    """LR variants available for a run; ``both`` means bicubic + unknown."""
+    return ("bicubic", "unknown") if lr_type == "both" else (lr_type,)
 
 
 # Run directories are named ``res{index:02d}`` (e.g. ``res01``), assigned in
@@ -64,41 +74,56 @@ def next_run_index(output_dir: str | Path) -> int:
 
 
 def build_datasets(args: argparse.Namespace):
-    """Return (train_pairs, val_pairs) using an aligned HR/LR file listing."""
+    """Return ``(train_groups, val_pairs)`` using aligned HR/LR listings.
+
+    ``train_groups`` is a list of ``(hr_path, {lr_type: lr_path})``; the training
+    dataset randomly picks an LR variant per access.  With ``--lr-type both``
+    each HR exposes both variants, so the two types can (but need not) appear
+    for the same HR within one epoch.  The Flickr validation split is done at
+    the *HR image* level, so the same HR never leaks into both splits.
+    """
     root = Path(args.data_root)
     rng = random.Random(args.seed)
 
-    train_pairs: list[tuple[Path, Path]] = []
-    val_pairs: list[tuple[Path, Path]] = []
+    train_types = requested_types(args.lr_type)
+    val_types = train_types
+    all_types = tuple(sorted(set(train_types) | set(val_types)))
 
-    # Training sources (hold out a fraction of Flickr for validation).
+    train_groups: list[tuple[Path, dict[str, Path]]] = []
+    val_groups: list[tuple[Path, dict[str, Path]]] = []
+
+    # Training sources (hold out a fraction of Flickr's HR images for validation).
     for hr_rel, lr_rel, val_frac in TRAIN_SOURCES:
-        pairs = collect_pairs(
-            root / hr_rel, root / _fmt(lr_rel, args.scale, args.lr_type), args.scale
-        )
-        if not pairs:
+        lr_dirs = {lt: root / _fmt(lr_rel, args.scale, lt) for lt in all_types}
+        items = collect_hr_items(root / hr_rel, lr_dirs, args.scale)
+        if not items:
             raise FileNotFoundError(
-                f"No HR/LR pairs found for {hr_rel} / "
-                f"{_fmt(lr_rel, args.scale, args.lr_type)}"
+                f"No HR/LR pairs found for {hr_rel} ({', '.join(all_types)})"
             )
-        rng.shuffle(pairs)
-        n_val = int(len(pairs) * val_frac)
-        val_pairs.extend(pairs[:n_val])
-        train_pairs.extend(pairs[n_val:])
+        rng.shuffle(items)
+        n_val = int(len(items) * val_frac)
+        val_groups.extend(items[:n_val])
+        train_groups.extend(items[n_val:])
 
     # Dedicated validation sources (DIV2K valid).
     for hr_rel, lr_rel, _ in VAL_SOURCES:
-        pairs = collect_pairs(
-            root / hr_rel, root / _fmt(lr_rel, args.scale, args.lr_type), args.scale
-        )
-        if not pairs:
+        lr_dirs = {lt: root / _fmt(lr_rel, args.scale, lt) for lt in all_types}
+        items = collect_hr_items(root / hr_rel, lr_dirs, args.scale)
+        if not items:
             raise FileNotFoundError(
-                f"No HR/LR pairs found for {hr_rel} / "
-                f"{_fmt(lr_rel, args.scale, args.lr_type)}"
+                f"No HR/LR pairs found for {hr_rel} ({', '.join(all_types)})"
             )
-        val_pairs.extend(pairs)
+        val_groups.extend(items)
 
-    return train_pairs, val_pairs
+    def flatten(groups, types):
+        pairs = []
+        for hr, lrs in groups:
+            for lt in types:
+                if lt in lrs:
+                    pairs.append((hr, lrs[lt]))
+        return pairs
+
+    return train_groups, flatten(val_groups, val_types)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +181,23 @@ def validate(model, loader, device, use_amp):
     return total_psnr / max(1, len(loader.dataset)), per_image
 
 
+@torch.no_grad()
+def validate_all(model, loaders: dict, device, use_amp):
+    """Validate on one loader per LR type and return the combined PSNR."""
+    per_type: dict[str, float] = {}
+    per_image = []
+    weighted = 0.0
+    count = 0
+    for lr_type, loader in loaders.items():
+        p, imgs = validate(model, loader, device, use_amp)
+        per_type[lr_type] = p
+        per_image.extend(imgs)
+        n = len(loader.dataset)
+        weighted += p * n
+        count += n
+    return weighted / max(1, count), per_type, per_image
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -174,9 +216,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument(
         "--lr-type",
         type=str,
-        default="bicubic",
-        choices=["bicubic", "unknown"],
-        help="bicubic = clean downscale (standard benchmark); unknown = realistic degradation",
+        default="both",
+        choices=["bicubic", "unknown", "both"],
+        help=(
+            "bicubic = clean downscale; unknown = realistic degradation; "
+            "both = mix both LR variants for every HR image"
+        ),
     )
     p.add_argument("--patch-size", type=int, default=192, help="HR patch size")
     p.add_argument("--batch-size", type=int, default=16)
@@ -265,25 +310,27 @@ def main(argv=None) -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     use_amp = (not args.no_amp) and device.type == "cuda"
 
-    train_pairs, val_pairs = build_datasets(args)
+    train_groups, val_pairs = build_datasets(args)
     if args.max_train_items > 0:
-        train_pairs = train_pairs[: args.max_train_items]
+        train_groups = train_groups[: args.max_train_items]
     if args.max_val_items > 0:
         val_pairs = val_pairs[: args.max_val_items]
+
+    repeats = len(requested_types(args.lr_type))
     print(
-        f"lr type: {args.lr_type} | train pairs: {len(train_pairs)} | "
+        f"lr type: {args.lr_type} | train HRs: {len(train_groups)} "
+        f"(x{repeats} = {len(train_groups) * repeats} samples) | "
         f"val pairs: {len(val_pairs)}"
     )
 
-    train_ds = SRTrainDataset(
-        train_pairs,
+    train_ds = SRMixTrainDataset(
+        train_groups,
         scale=args.scale,
         patch_size=args.patch_size,
         augment=not args.no_augment,
         seed=args.seed,
+        repeats=repeats,
     )
-    val_ds = SRValDataset(val_pairs, scale=args.scale)
-
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -293,13 +340,20 @@ def main(argv=None) -> None:
         drop_last=True,
         persistent_workers=args.num_workers > 0,
     )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=1,
-        shuffle=False,
-        num_workers=min(2, args.num_workers),
-        pin_memory=True,
-    )
+
+    val_by_type: dict[str, list[tuple[Path, Path]]] = {}
+    for hr, lr in val_pairs:
+        val_by_type.setdefault(lr_type_of(lr), []).append((hr, lr))
+    val_loaders = {
+        lr_type: DataLoader(
+            SRValDataset(pairs, scale=args.scale),
+            batch_size=1,
+            shuffle=False,
+            num_workers=min(2, args.num_workers),
+            pin_memory=True,
+        )
+        for lr_type, pairs in val_by_type.items()
+    }
 
     arch_kwargs = model_kwargs_for(args.model, args)
     model = build_model(args.model, **arch_kwargs).to(device)
@@ -396,8 +450,11 @@ def main(argv=None) -> None:
             scheduler.step()
 
             val_psnr = None
+            per_type_psnr: dict[str, float] = {}
             if epoch % args.val_every == 0 or epoch == args.epochs:
-                val_psnr, per_image = validate(model, val_loader, device, use_amp)
+                val_psnr, per_type_psnr, per_image = validate_all(
+                    model, val_loaders, device, use_amp
+                )
                 if val_psnr > best_psnr:
                     best_psnr = val_psnr
                     torch.save(make_checkpoint(epoch, best_psnr), run_dir / "best.pth")
@@ -411,7 +468,12 @@ def main(argv=None) -> None:
             cur_lr = scheduler.get_last_lr()[0]
             msg = f"[{epoch:3d}/{args.epochs}] l1={train_loss:.5f} lr={cur_lr:.2e}"
             if val_psnr is not None:
-                msg += f" val_psnr={val_psnr:.3f} (best {best_psnr:.3f})"
+                msg += f" val_psnr={val_psnr:.3f}"
+                if len(per_type_psnr) > 1:
+                    msg += " (" + ", ".join(
+                        f"{k}={v:.3f}" for k, v in per_type_psnr.items()
+                    ) + ")"
+                msg += f" (best {best_psnr:.3f})"
             msg += f" {dt:.1f}s"
             print(msg)
             with log_path.open("a", newline="") as f:

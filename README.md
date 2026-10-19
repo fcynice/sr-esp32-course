@@ -70,9 +70,14 @@ bash scripts/download_div2k.sh       # 下载 DIV2K
 bash scripts/download_div2k_lr.sh    # 下载 DIV2K 的 LR 归档 (bicubic + unknown)
 ```
 
-> 训练默认使用 **`LR_bicubic`（干净下采样，标准超分基准）**，收敛更快、PSNR 更高，便于验证流程。
-> 也可用 `--lr-type unknown` 切换到 **真实退化** LR（含重度模糊），更贴近实际场景但难度高很多。
+> 训练默认 **`--lr-type both`**：每张 HR 同时对应 bicubic 和 unknown 两套 LR，
+> 每轮每张 HR 采样 2 次，每次**随机**选一种 LR。因此同一张 HR 在一轮内可能分别遇到两种 LR，
+> 也可能两次都是同一种（不是必然）。
+> 也可用 `--lr-type bicubic` 或 `--lr-type unknown` 只训练单一退化类型。
 > LR 与 HR 严格整数倍对齐（HR = r × LR），dataset 切割时按同一空间位置对齐取块。
+>
+> 验证默认覆盖训练所用的全部 LR 类型（`both` 时同时报告 bicubic / unknown 的 PSNR），
+> 控制台会显示分项：`val_psnr=... (bicubic=..., unknown=...)`。
 
 ### bicubic vs unknown（实测参考）
 
@@ -129,7 +134,7 @@ train-sr --model edsr --epochs 150
 | `--output-dir` | `runs` | 输出目录 |
 | `--model` | `edsr` | `espcn` 或 `edsr` |
 | `--scale` | `4` | 放大倍数（2/3/4/8） |
-| `--lr-type` | `bicubic` | LR 类型：`bicubic`（干净，推荐）或 `unknown`（真实退化） |
+| `--lr-type` | `both` | `bicubic` / `unknown` / `both`（混合，每次随机选一种 LR） |
 | `--patch-size` | `192` | HR 训练块大小（须能被 scale 整除，X4 对应 LR 48×48） |
 | `--batch-size` | `16` | 批大小 |
 | `--epochs` | `100` | 训练轮数 |
