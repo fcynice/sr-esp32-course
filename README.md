@@ -174,6 +174,23 @@ checkpoint（`best.pth` / `last.pth`）是**自描述**的，内部保存了 `mo
 > python scripts/migrate_runs.py runs --default-lr-type unknown
 > ```
 
+## 断点续训
+
+训练可以随时按 `Ctrl+C` 停止：每个 epoch 结束会写 `last.pth`，中断时也会保存一次当前进度（含 optimizer / scaler 状态）。之后用 `--resume` 接着**同一个 run** 训练，日志追加到同一个 `train_log.csv`，不会新建目录。
+
+```bash
+# 接着某个 run 继续（把 resNN 换成实际目录，例如 res05）
+.venv/bin/python -m superresolution.train --resume runs/resNN --epochs 150
+
+# 也可以省略 --epochs，沿用 checkpoint 里的总轮数
+.venv/bin/python -m superresolution.train --resume runs/resNN
+```
+
+- `--resume` 可以给 run 目录（自动使用其中的 `last.pth`），也可以直接给 checkpoint 文件路径。
+- 数据 / 模型 / 超参默认从 checkpoint 恢复；`--epochs` 用来延长总轮数。
+- 学习率会按余弦调度接续到当前 epoch，不会跳回初始值。
+- 旧 checkpoint（如 res04）没有 optimizer 状态，续训会重新初始化 Adam（会打印 warning），但 LR 仍正确衔接。
+
 ## 推理
 
 单张图片：
