@@ -112,6 +112,194 @@ X4、相同网络与数据划分下的验证 PSNR：
 - 验证在**整图**上计算 PSNR（标准 SR 评价协议）。`both` 时分别验证两种 LR；`train_log.csv` 的 `val_psnr` 是所有验证图（两种 LR 合计）的平均值，`best.pth` 也按这个平均值选取。
 - 划分使用固定随机种子（默认 `--seed 42`），保证可复现。
 
+## ESP32 摄像头退化（版本化，on-the-fly）
+
+基于真实 `data/esp32_camera/data01` 校准的 ESP32 摄像头退化模型。与 DIV2K /
+Flickr2K 自带的 bicubic / unknown LR 不同，这一路**不预生成全量 LR**，训练时按
+patch 实时退化。
+
+### 本轮新增/修改
+
+```text
+src/superresolution/degrade/
+├── __init__.py      # 版本注册、公共 API、代码指纹
+├── ops.py           # 底层算子（模糊/噪声/残影/JPEG/色调等，随版本冻结）
+├── v1.py            # v1 退化配方与管线（审核后冻结）
+├── stats.py         # 模拟图 / 参考图统计
+├── cli.py           # 人工审查图生成 CLI
+└── __main__.py      # python -m superresolution.degrade
+
+src/superresolution/dataset.py   # + ESP32SRTrainDataset / ESP32SRValDataset
+src/superresolution/train.py     # + --lr-type esp32 及退化参数
+servers/degrade_review_server/   # 审查可视化服务（端口 8002）
+servers/README.md                # 服务登记
+pyproject.toml                   # + degrade-sr 命令
+```
+
+### 版本冻结与代码指纹
+
+- `v1.py` 的 profile 范围和管线在人工审核后视为冻结。
+- 后续调参必须新增 `v2.py`、`v3.py` 并注册，**不要修改 `v1.py`**。
+- 共享的 `ops.py` 也参与版本指纹；新版本如需不同底算子，应新增独立模块。
+- `manifest.json` 和训练 `run_info.json` 都记录 `fingerprint`，用于确认旧
+  session / checkpoint 对应的退化代码没有被改过。
+- 当前 v1 指纹：
+
+```text
+555a9e08e8de9a57cc49b50564ddc8211cc8bff72bf972318b4150190c05ee9a
+```
+
+### 退化覆盖
+
+- **噪声**：散粒噪声、读出噪声、色度噪声、行列固定模式噪声、热像素
+- **色彩/曝光**：绿偏、白平衡误差、低饱和、欠曝、黑位抬升、低对比、gamma
+- **镜头**：高斯软焦、失焦、运动模糊、色差、暗角
+- **时间域**：多帧残影、慢快门拖影、滚动快门条带
+- **高光**：软裁切、灯光泛光
+- **压缩**：真实 JPEG 编解码（4:2:0 / 4:2:2 / 4:4:4，按 quality 自动选择）
+- **配方**：9 个 profile，训练时按权重随机采样
+
+| Profile | 权重 | 主要内容 |
+|---|---:|---|
+| `green_indoor` | 0.20 | 荧光灯绿偏、低饱和、软焦、弱光 |
+| `lowlight_noise` | 0.20 | 欠曝、暗部强噪声、色度噪声、暗角 |
+| `motion_blur` | 0.12 | 运动模糊、低对比 |
+| `ghosting` | 0.12 | 多帧残影、拖影、条带、轻微滚动快门 |
+| `defocus` | 0.12 | 失焦、镜头软、低对比 |
+| `day_soft` | 0.10 | 白天、轻软焦、轻噪声、较正常色彩 |
+| `overexposed` | 0.07 | 高光裁切、泛光、雾化 |
+| `jpeg_hard` | 0.05 | 低质量 JPEG、块效应、色带 |
+| `mixed_hard` | 0.02 | 多种重度退化叠加，困难样本 |
+
+### 训练数据划分（`--lr-type esp32`）
+
+只使用 HR，不读取任何 `*_LR_*` 目录：
+
+| 用途 | 来源 | 数量 |
+|---|---|---:|
+| 训练 | DIV2K train 全部 | 800 |
+| 训练 | Flickr2K 的 95% | 2518 |
+| 验证 | DIV2K valid 全部 | 100 |
+| 验证 | Flickr2K 的 5% | 132 |
+| **训练合计** |  | **3318 HR / epoch** |
+| **验证合计** |  | **232 HR** |
+
+Flickr2K 的 5% 验证集按 HR 图像划分，同一 HR 不会同时出现在训练和验证中。
+划分由 `--seed` 控制。
+
+### 训练样本构造
+
+默认 `scale=4`、`patch_size=192`、`degrade_margin=8` LR px。每次
+`__getitem__` 都重新随机：
+
+```text
+随机 HR
+-> 随机裁 HR 区域 256×256       # patch_size + 2 * margin * scale
+-> 整块实时退化并降采样        # 256×256 -> LR 64×64
+-> 中心裁掉 margin             # LR 64×64 -> 48×48
+-> 同时裁 HR 中心              # HR 256×256 -> 192×192
+-> HR/LR 同步翻转/90° 旋转
+-> 返回 (LR 48×48, HR 192×192)
+```
+
+带 margin 的目的是让模糊、残影、暗角、JPEG 在 patch 边缘自然过渡，避免逐
+patch 独立退化产生明显拼接边界。
+
+训练时每次访问都会重新采样 **profile + 退化参数 seed + patch 位置**，因此：
+
+- 同一张 HR 在不同 epoch 看到不同 patch 和不同退化
+- 每个 epoch 每张 HR 只出现一次：3318 个训练样本
+- profile 按上表权重随机；可用 `--degrade-profiles` 限制子集
+- `--degrade-severity` 控制整体退化强度
+
+训练循环沿用现有训练器：`shuffle=True`、默认 `batch_size=16`、
+`drop_last=True`、`num_workers=4`、L1 loss、Adam、CosineAnnealing、AMP。
+
+### 验证策略
+
+验证集使用固定退化，保证不同 epoch 的 PSNR 可比：
+
+```text
+第 i 张验证 HR：
+  profile = profiles[i % len(profiles)]
+  seed    = args.seed + i * 1000003
+  HR 整图 -> ESP32 退化 -> 整图 LR
+  HR 裁到 LR 尺寸 × scale
+  计算整图 PSNR
+```
+
+- 232 张验证图，9 个 profile 大致均匀轮转
+- `val_psnr` 是这些图 PSNR 的平均值，不是按训练 profile 权重加权
+- 该 PSNR **不能**与 bicubic / unknown 的 PSNR 绝对值直接比较；LR 退化更重，
+  绝对值会低很多，主要用于看训练趋势和相对提升
+
+### 生成人工审查图
+
+```bash
+# 9 个 profile × (DIV2K, Flickr2K) × 每个 2 张 = 36 张
+python -m superresolution.degrade --per-profile 2 --seed 42
+```
+
+本轮生成的审查 session：
+
+```text
+data/esp32_degrade_review/v1_review_20261020/
+├── manifest.json          # v1、seed、代码指纹
+├── manifest.jsonl         # 每张图：源 HR、profile、seed、参数、统计
+├── summary.json           # 与 data01 参考统计对比
+├── images/                # 36 张模拟 LR（PNG，已烘焙 JPEG 痕迹）
+└── previews/
+    ├── contact_sheet.jpg
+    └── reference_sheet.jpg
+```
+
+审查服务（实现方式与 `sr_infer_server` 一致）：
+
+```bash
+uv run python -m servers.degrade_review_server --port 8002
+# 打开 http://127.0.0.1:8002
+```
+
+功能：session 选择、profile/来源过滤、搜索、HR vs 模拟 LR 并排、完整退化参数、
+绿偏/噪声/清晰度指标、真实 `data01` 参考图条。详见
+[`servers/degrade_review_server/README.md`](servers/degrade_review_server/README.md)。
+
+本轮 v1 审查集与 `data01` 的中位数统计对比（仅作校准参考，模拟集包含白天和
+其他 profile，不完全对应 data01 的弱光场景）：
+
+| 指标 | v1 审查集 | data01 |
+|---|---:|---:|
+| 绿偏 G-(R+B)/2 | 4.08 | 4.62 |
+| 饱和度 | 16.62 | 8.53 |
+| 噪声 σ | 1.45 | 0.71 |
+| Laplacian 方差 | 77.5 | 28.5 |
+
+### 训练命令
+
+```bash
+python -m superresolution.train \
+  --model edsr --lr-type esp32 --degrade-version v1 \
+  --patch-size 192 --batch-size 16 --epochs 150
+```
+
+调试：
+
+```bash
+python -m superresolution.train \
+  --model espcn --lr-type esp32 \
+  --degrade-profiles green_indoor,ghosting \
+  --max-train-items 8 --max-val-items 4 \
+  --patch-size 64 --batch-size 2 --epochs 1 \
+  --val-every 1 --num-workers 0 --device cpu
+```
+
+### 注意
+
+- `--lr-type esp32` 不会和 bicubic / unknown 混合；`both` 仍表示原来的两种 LR。
+- `--lr-type esp32` 完全跳过 `build_datasets()`，因此不要求任何预生成 LR 目录。
+- 训练时 JPEG 压缩作用在带 margin 的 LR patch 上；验证时作用在整图 LR 上。
+- 本轮未处理 `esp_video` 抽帧；视频参考留作后续可选扩展。
+
 ## 安装
 
 ```bash
@@ -146,7 +334,11 @@ train-sr --model edsr --epochs 150
 | `--output-dir` | `runs` | 输出目录 |
 | `--model` | `edsr` | `espcn` 或 `edsr` |
 | `--scale` | `4` | 放大倍数（2/3/4/8） |
-| `--lr-type` | `both` | `bicubic` / `unknown` / `both`（混合，每次随机选一种 LR） |
+| `--lr-type` | `both` | `bicubic` / `unknown` / `both`（混合，每次随机选一种 LR） / `esp32`（实时版本化退化） |
+| `--degrade-version` | `v1` | ESP32 退化模型版本（`--lr-type esp32`） |
+| `--degrade-margin` | `8` | patch 退化的 LR 上下文边距（`--lr-type esp32`） |
+| `--degrade-severity` | `1.0` | 退化整体强度（`--lr-type esp32`） |
+| `--degrade-profiles` | 空 | 逗号分隔的 profile 子集，空表示全部（`--lr-type esp32`） |
 | `--patch-size` | `192` | HR 训练块大小（须能被 scale 整除，X4 对应 LR 48×48） |
 | `--batch-size` | `16` | 批大小 |
 | `--epochs` | `100` | 训练轮数 |

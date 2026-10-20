@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ESP32 退化审查</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span>ESP32 退化审查</span>
+        <span id="versionBadge" class="badge muted">v1</span>
+      </div>
+      <div class="top-actions">
+        <a id="contactLink" class="text-link" target="_blank" rel="noreferrer" hidden>打开预览拼图</a>
+        <a id="referenceLink" class="text-link" target="_blank" rel="noreferrer" hidden>真实参考目录</a>
+        <span id="health" class="muted small"></span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="panel">
+          <h2>审查会话</h2>
+          <select id="sessionSelect" class="select"></select>
+          <div id="sessionMeta" class="meta-block">加载中…</div>
+        </section>
+
+        <section class="panel">
+          <h2>Profile</h2>
+          <div id="profileFilters" class="chips"></div>
+        </section>
+
+        <section class="panel">
+          <h2>来源</h2>
+          <div id="sourceFilters" class="chips"></div>
+        </section>
+
+        <section class="panel">
+          <label class="search-label" for="searchInput">搜索</label>
+          <input id="searchInput" class="search" type="search" placeholder="文件名 / profile / seed" />
+        </section>
+
+        <section class="panel">
+          <h2>统计校准</h2>
+          <div id="statsTable" class="stats-table muted small"></div>
+        </section>
+
+        <section class="panel">
+          <div id="visibleCount" class="muted small"></div>
+        </section>
+      </aside>
+
+      <section class="content">
+        <div class="content-head">
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-view="review">模拟 LR</button>
+            <button class="tab" data-view="reference">真实 ESP32 参考</button>
+          </div>
+          <div id="viewHint" class="muted small"></div>
+        </div>
+
+        <div id="reviewGrid" class="grid"></div>
+        <div id="referenceGrid" class="grid reference-grid" hidden></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <div>
+          <h2 id="modalTitle">—</h2>
+          <div id="modalSub" class="muted small"></div>
+        </div>
+        <button class="icon-button" data-close aria-label="关闭">×</button>
+      </header>
+
+      <div class="compare">
+        <figure>
+          <figcaption>HR 原图 <span class="muted small">source</span></figcaption>
+          <img id="modalHr" alt="HR source" />
+        </figure>
+        <figure>
+          <figcaption>模拟 LR <span class="muted small">v1 output</span></figcaption>
+          <img id="modalLr" alt="simulated LR" />
+        </figure>
+      </div>
+
+      <div class="modal-bottom">
+        <div class="modal-meta">
+          <div id="modalChips" class="chips"></div>
+          <pre id="modalSpec" class="spec"></pre>
+        </div>
+        <div class="reference-strip">
+          <div class="strip-head">
+            <h3>真实 ESP32 参考</h3>
+            <span class="muted small">data01，仅用于画质对照</span>
+          </div>
+          <div id="modalReference" class="strip"></div>
+        </div>
+      </div>
+
+      <footer class="modal-foot">
+        <button id="prevBtn" class="nav-button">← 上一张</button>
+        <span id="modalIndex" class="muted small"></span>
+        <button id="nextBtn" class="nav-button">下一张 →</button>
+      </footer>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

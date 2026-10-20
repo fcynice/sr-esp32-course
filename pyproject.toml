@@ -10,17 +10,21 @@ requires-python = ">=3.14"
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "curl-cffi>=0.16.3",
+    "fastapi>=0.143.2",
     "lxml>=6.1.3",
+    "python-multipart>=0.0.32",
     "requests>=2.34.2",
     "torch>=2.14.1",
     "torchvision>=0.29.1",
     "tqdm>=4.70.1",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]
 superresolution = "superresolution:main"
 train-sr = "superresolution.train:main"
 infer-sr = "superresolution.infer:main"
+degrade-sr = "superresolution.degrade.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
