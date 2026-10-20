@@ -30,11 +30,13 @@ RGB 输入、放大倍数 `r`（默认 4）：
 head  Conv3x3        3 -> C
 body  N x ResidualBlock(C)          # x + 0.1 * conv2(relu(conv1(x)))
 fuse  conv_after(body) + head       # 全局残差（LR 空间）
-up    [Conv3x3 C -> C*4, PixelShuffle(2)] x log2(r)
+up    [Conv3x3 C -> C*4, PixelShuffle(2)] x log2(r)   # r=2/4/8
+      (r=3 时改用一级 Conv3x3 C -> C*9, PixelShuffle(3))
 tail  Conv3x3        C -> 3
 ```
 
 - 无 BatchNorm；残差分支乘 `0.1`，避免深层堆叠时数值爆炸。
+- 上采样：r=2/4/8 用多级 `PixelShuffle(2)`；r=3 用单个 `PixelShuffle(3)`。
 - 默认 `C=128, N=32` → **10.78M** 参数；可用 `--channels` / `--n-blocks` 调整。
 - 显存实测（RTX 5070 8GB，patch 192、batch 16）：训练峰值约 **1.2 GB**，整图验证约 1.8 GB。
 
@@ -62,6 +64,10 @@ data/
     ├── Flickr2K_LR_bicubic/X4/         # <stem>x4.png
     └── Flickr2K_LR_unknown/X4/         # <stem>x4.png
 ```
+
+> 目录中的 `X4` 随 `--scale` 变化（`X2` / `X3` / `X4`）。LR 默认按 `<HR stem>x{scale}.png`
+> 匹配（例如 HR `0001.jpeg` ↔ LR `0001x4.png`，其他扩展名也可）。接入自己的数据集时
+> 按同样结构放置，或修改 `train.py` 顶部的 `TRAIN_SOURCES` / `VAL_SOURCES`。
 
 下载脚本（可选，数据已就位可跳过）：
 
@@ -91,14 +97,20 @@ X4、相同网络与数据划分下的验证 PSNR：
 `unknown` 的 LR 是重度模糊退化（其到 HR 的 MAE 约为 bicubic LR 的 2 倍），3 层小网络难以完全还原；
 即使对比 bicubic 上采样基线，模型也仅领先约 +0.9 dB。建议先用 `bicubic` 跑通，再尝试 `unknown` 或更大的网络。
 
+> 上表是早期单类型实验的参考。当前默认 `--lr-type both` 会同时训练两种退化；
+> 只想复现单类型时用 `--lr-type bicubic` 或 `--lr-type unknown`。
+
 ### 数据划分
 
-| 用途 | 来源 | 数量 |
-|---|---|---|
-| 训练 | DIV2K train + Flickr2K 的 95% | 800 + 2517 |
-| 验证 | DIV2K valid + Flickr2K 的 5% | 100 + 133 |
+| 用途 | 来源 | HR 图片数 | 单类型样本 | `both` 样本 |
+|---|---|---|---|---|
+| 训练 | DIV2K train 全部 + Flickr2K 的 95% | 800 + 2518 = 3318 | 3318 | 6636 |
+| 验证 | DIV2K valid 全部 + Flickr2K 的 5% | 100 + 132 = 232 | 232 | 464 |
 
-验证在**整图**上计算 PSNR（标准 SR 评价协议）。Flickr 的验证子集用固定随机种子（默认 42）划分，保证可复现。
+- Flickr 的 5% 验证集按 **HR 图片** 划分（不是按 LR 对），因此同一张 HR 不会同时出现在训练和验证中。
+- `--lr-type both` 时每张 HR 暴露 2 个样本，所以样本数和单 epoch 时间约翻倍。
+- 验证在**整图**上计算 PSNR（标准 SR 评价协议）。`both` 时分别验证两种 LR；`train_log.csv` 的 `val_psnr` 是所有验证图（两种 LR 合计）的平均值，`best.pth` 也按这个平均值选取。
+- 划分使用固定随机种子（默认 `--seed 42`），保证可复现。
 
 ## 安装
 
@@ -146,6 +158,10 @@ train-sr --model edsr --epochs 150
 | `--num-workers` | `4` | DataLoader 线程数 |
 | `--no-augment` | — | 关闭翻转/旋转增强 |
 | `--no-amp` | — | 关闭混合精度 |
+| `--seed` | `42` | 随机种子（数据划分 / 增强 / LR 采样） |
+| `--resume` | — | 从 run 目录或 checkpoint 续训（见「断点续训」） |
+
+> `--max-train-items` / `--max-val-items` 是调试参数：前者限制训练的 **HR 图片数**（`both` 时实际样本为 2 倍），后者限制展平后的验证样本数。
 
 训练产物保存在 `runs/res{序号}/`，序号按时间顺序递增（越早越小，两位补零）：
 
@@ -187,9 +203,11 @@ checkpoint（`best.pth` / `last.pth`）是**自描述**的，内部保存了 `mo
 ```
 
 - `--resume` 可以给 run 目录（自动使用其中的 `last.pth`），也可以直接给 checkpoint 文件路径。
-- 数据 / 模型 / 超参默认从 checkpoint 恢复；`--epochs` 用来延长总轮数。
+- 数据 / 模型 / 超参默认从 checkpoint 恢复。**续训不能切换 `--lr-type`、`--model`、`--scale` 等配置**（`--device` / `--num-workers` 除外）；要改配置请新开一个 run。
+- `--epochs` 可以延长或缩短总轮数；改变总轮数会用新的 `T_max` 重新计算余弦调度，LR 曲线会随之变化。
 - 学习率会按余弦调度接续到当前 epoch，不会跳回初始值。
-- 旧 checkpoint（如 res04）没有 optimizer 状态，续训会重新初始化 Adam（会打印 warning），但 LR 仍正确衔接。
+- 若在 epoch 中途 `Ctrl+C`，会以当前 epoch 保存；续训从下一 epoch 开始，该 epoch 剩余的 batch 会被跳过（随机采样下影响可忽略）。
+- 新 checkpoint 会恢复 optimizer / scaler 状态；旧 checkpoint（如 res04）没有 optimizer 状态，续训会重新初始化 Adam（会打印 warning），但 LR 仍正确衔接。
 
 ## 推理
 
@@ -209,13 +227,17 @@ checkpoint（`best.pth` / `last.pth`）是**自描述**的，内部保存了 `mo
   --input lr_dir --output sr_dir
 ```
 
+也可以使用安装的命令：`infer-sr --checkpoint ... --input ... --output ...`
+
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--tile` | `0` | 分块推理的块大小，`0` 为整图（大图省显存） |
 | `--tile-overlap` | `8` | 分块重叠像素，减少拼接痕迹 |
 | `--device` | `cuda` | 推理设备 |
 
-输出保存为 `*_x{scale}.png`。
+输出命名：目录模式为 `<stem>_x{scale}.png`；单文件模式直接保存到 `--output` 指定的路径。
+
+> checkpoint 会自描述模型结构（`model_name` / `model_kwargs`），任意 run 的 `best.pth` / `last.pth` 都可直接用于推理。
 
 ## 对齐说明
 
@@ -232,9 +254,9 @@ LR 起点 = (y, x)               LR 块 = (patch/scale, patch/scale)
 
 ```
 src/superresolution/
-├── model.py      # ESPCN 网络
-├── dataset.py    # 对齐切割的数据集 + 数据加载
-├── train.py      # 训练 / 验证
+├── model.py      # ESPCN / EDSR 网络
+├── dataset.py    # 对齐切割、bicubic/unknown 混合数据集
+├── train.py      # 训练 / 验证 / 断点续训
 └── infer.py      # 推理
 scripts/          # 数据集下载脚本 + runs 目录迁移脚本
 ```
