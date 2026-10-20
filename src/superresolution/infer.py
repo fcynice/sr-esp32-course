@@ -16,6 +16,7 @@ Whole directory::
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,24 @@ def load_model(checkpoint: str | Path, device: torch.device):
     return model
 
 
+def _tile_starts(size: int, tile: int, step: int) -> list[int]:
+    """Return tile origins covering ``size`` with the last tile flush at the edge."""
+    if size <= tile:
+        return [0]
+    starts = list(range(0, size - tile + 1, step))
+    tail = size - tile
+    if starts[-1] != tail:
+        # If the tail is within the overlap distance of the previous tile, the
+        # last regular tile can be moved to the edge instead of adding another
+        # (mostly redundant) tile.
+        overlap = tile - step
+        if len(starts) >= 2 and tail - starts[-1] <= overlap:
+            starts[-1] = tail
+        else:
+            starts.append(tail)
+    return starts
+
+
 @torch.inference_mode()
 def super_resolve(
     model: torch.nn.Module,
@@ -55,28 +74,42 @@ def super_resolve(
     device: torch.device,
     tile: int = 0,
     tile_overlap: int = 8,
+    progress_cb: Callable[[float, str], None] | None = None,
 ) -> Image.Image:
-    """Run the model on an RGB PIL image, optionally in tiles (saves memory)."""
+    """Run the model on an RGB PIL image, optionally in tiles (saves memory).
+
+    ``progress_cb`` receives ``(fraction, message)`` where fraction is in
+    ``[0, 1]``.  Tiled inference reports after every tile; full-image inference
+    reports only start and finish.
+    """
+
+    def report(fraction: float, message: str) -> None:
+        if progress_cb is not None:
+            progress_cb(max(0.0, min(1.0, fraction)), message)
+
     arr = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
     tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(device)
 
     if tile <= 0 or (tensor.shape[-2] <= tile and tensor.shape[-1] <= tile):
+        report(0.05, "整图推理")
         out = model(tensor)
+        report(0.9, "转换输出")
         out = out.clamp(0, 1).squeeze(0).permute(1, 2, 0).cpu().numpy()
-        return Image.fromarray((out * 255.0 + 0.5).astype(np.uint8))
+        result = Image.fromarray((out * 255.0 + 0.5).astype(np.uint8))
+        report(1.0, "完成")
+        return result
 
     # Tiled inference with overlap blending.
     scale = model.scale
     _, _, h, w = tensor.shape
     out = torch.zeros((1, 3, h * scale, w * scale), device=device)
     weight = torch.zeros((1, 1, h * scale, w * scale), device=device)
-    step = tile - tile_overlap
-    ys = list(range(0, max(1, h - tile + 1), step))
-    xs = list(range(0, max(1, w - tile + 1), step))
-    if ys[-1] != h - tile:
-        ys.append(max(0, h - tile))
-    if xs[-1] != w - tile:
-        xs.append(max(0, w - tile))
+    step = max(1, tile - max(0, min(tile_overlap, tile - 1)))
+    ys = _tile_starts(h, tile, step)
+    xs = _tile_starts(w, tile, step)
+    total = len(ys) * len(xs)
+    done = 0
+    report(0.0, f"0/{total} 块")
     for y in ys:
         for x in xs:
             patch = tensor[:, :, y : y + tile, x : x + tile]
@@ -85,8 +118,13 @@ def super_resolve(
             ph, pw = sr.shape[-2], sr.shape[-1]
             out[:, :, py : py + ph, px : px + pw] += sr
             weight[:, :, py : py + ph, px : px + pw] += 1.0
+            done += 1
+            report(done / total, f"{done}/{total} 块")
+    report(1.0, "拼接分块")
     out = (out / weight.clamp_min(1e-8)).clamp(0, 1).squeeze(0).permute(1, 2, 0)
-    return Image.fromarray((out.cpu().numpy() * 255.0 + 0.5).astype(np.uint8))
+    result = Image.fromarray((out.cpu().numpy() * 255.0 + 0.5).astype(np.uint8))
+    report(1.0, "完成")
+    return result
 
 
 def parse_args(argv=None) -> argparse.Namespace:

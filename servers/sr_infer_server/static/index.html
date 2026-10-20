@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>超分推理可视化</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">SR</span>
+      <div>
+        <h1>超分推理可视化</h1>
+        <p id="healthText">连接中…</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span class="device-pill" id="devicePill">设备检测中</span>
+      <a href="/docs" target="_blank" rel="noreferrer">API 文档</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel browser-panel">
+        <div class="panel-head">
+          <h2>图片目录</h2>
+          <button id="refreshBrowse" class="icon-btn" title="刷新当前目录">↻</button>
+        </div>
+        <p class="panel-hint">只列出当前目录下的 PNG / JPG，不递归。</p>
+        <div id="quickRoots" class="quick-roots"></div>
+        <div id="breadcrumbs" class="breadcrumbs"></div>
+        <div id="browseLoading" class="loading hidden">加载中…</div>
+        <div id="dirList" class="dir-list"></div>
+        <div id="imageGrid" class="image-grid"></div>
+        <div id="browseEmpty" class="empty hidden">当前目录没有 PNG / JPG 图片</div>
+      </section>
+    </aside>
+
+    <section class="main">
+      <section class="panel model-panel">
+        <div class="panel-head">
+          <h2>推理模型</h2>
+          <span id="runCount" class="muted"></span>
+        </div>
+        <div class="model-controls">
+          <label class="field">
+            <span>运行</span>
+            <select id="runSelect"></select>
+          </label>
+          <label class="field">
+            <span>权重</span>
+            <select id="ckptSelect"></select>
+          </label>
+        </div>
+        <div id="modelInfo" class="info-grid"></div>
+      </section>
+
+      <section class="panel selected-panel">
+        <div class="panel-head">
+          <h2>推理图片</h2>
+          <span id="selectedMeta" class="muted">尚未选择图片</span>
+        </div>
+        <div class="selected-row">
+          <div id="selectedPreview" class="selected-preview">
+            <span>从左侧目录选择一张图片</span>
+          </div>
+          <div class="selected-actions">
+            <button id="inferBtn" class="primary" disabled>开始推理</button>
+            <a id="downloadBtn" class="button secondary hidden" download>下载 SR 图片</a>
+            <div class="progress-wrap hidden" id="progressWrap">
+              <div class="progress"><div id="progressBar"></div></div>
+              <span id="progressText"></span>
+            </div>
+            <div id="errorText" class="error hidden"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel compare-panel">
+        <div class="panel-head compare-head">
+          <div class="compare-title">
+            <h2>对比</h2>
+            <span id="metricText" class="metric"></span>
+          </div>
+          <div class="compare-tools">
+            <div class="segmented" id="modeSwitch">
+              <button data-mode="side" class="active">左右并排</button>
+              <button data-mode="line">拖动线对比</button>
+            </div>
+            <div class="segmented" id="pairSwitch">
+              <button data-pair="lr_sr" class="active">LR / SR</button>
+              <button data-pair="sr_hr">SR / HR</button>
+              <button data-pair="lr_hr">LR / HR</button>
+            </div>
+            <button id="swapPairBtn" class="secondary" title="交换左右">⇄</button>
+            <button id="resetViewBtn" class="secondary">适应窗口</button>
+          </div>
+        </div>
+
+        <div id="resultInfo" class="result-info hidden"></div>
+
+        <div id="refStrip" class="ref-strip hidden"></div>
+
+        <div id="angleRow" class="angle-row hidden">
+          <label class="angle-control">
+            <span>分割线角度</span>
+            <input id="angleSlider" type="range" min="0" max="360" step="1" value="90">
+            <strong id="angleValue">90°</strong>
+          </label>
+          <span class="muted">拖动线中间圆点移动分割线；滚轮缩放，拖动画布平移。</span>
+        </div>
+
+        <div id="stageWrap" class="stage-wrap">
+          <div id="emptyStage" class="empty-stage">选择图片并点击「开始推理」后显示对比</div>
+
+          <div id="sideMode" class="side-mode hidden">
+            <div class="pane">
+              <div class="pane-head">
+                <span class="pane-label" id="sideLabelA">推理前</span>
+                <span class="pane-dim" id="sideDimA"></span>
+              </div>
+              <div class="viewport" id="sideViewportA">
+                <div class="canvas" id="sideCanvasA"><img alt=""></div>
+              </div>
+            </div>
+            <div class="pane">
+              <div class="pane-head">
+                <span class="pane-label" id="sideLabelB">推理后</span>
+                <span class="pane-dim" id="sideDimB"></span>
+              </div>
+              <div class="viewport" id="sideViewportB">
+                <div class="canvas" id="sideCanvasB"><img alt=""></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="lineMode" class="line-mode hidden">
+            <div class="pane-head line-head">
+              <span class="pane-label" id="lineLabelA">推理前</span>
+              <span class="pane-label" id="lineLabelB">推理后</span>
+            </div>
+            <div class="viewport" id="lineViewport">
+              <div class="canvas" id="lineCanvasA"><img id="lineImgA" alt=""></div>
+              <div class="clip-layer" id="clipLayer">
+                <div class="canvas" id="lineCanvasB"><img id="lineImgB" alt=""></div>
+              </div>
+              <svg class="line-svg" id="lineSvg" xmlns="http://www.w3.org/2000/svg">
+                <line id="dividerHit" x1="0" y1="0" x2="0" y2="0"></line>
+                <line id="dividerLine" x1="0" y1="0" x2="0" y2="0"></line>
+                <circle id="dividerHandle" r="9"></circle>
+              </svg>
+              <div class="line-tag" id="lineTagA">推理前</div>
+              <div class="line-tag" id="lineTagB">推理后</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
