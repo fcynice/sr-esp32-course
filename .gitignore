@@ -16,3 +16,8 @@ esp_video/
 # Training outputs
 runs/
 *.pth
+
+
+for_infer/
+phone/
+servers/esp32_capture_server/
