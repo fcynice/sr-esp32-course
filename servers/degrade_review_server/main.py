@@ -48,7 +48,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="ESP32 Degradation Review",
-    description="Compare on-the-fly ESP32-style degraded LR images with their HR source and real camera references.",
+    description="Compare pre-generated ESP32-style degraded LR images with their HR source and real camera references.",
     version=__version__,
     lifespan=lifespan,
 )

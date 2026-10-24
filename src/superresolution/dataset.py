@@ -57,13 +57,15 @@ def _load_rgb(path: Path) -> Image.Image:
 
 
 def lr_type_of(path: str | Path) -> str:
-    """Infer the LR variant (``bicubic`` / ``unknown``) from a LR file path."""
+    """Infer the LR variant (``bicubic`` / ``unknown`` / ``esp32``) from a path."""
     for parent in Path(path).parents:
         name = parent.name.lower()
         if "bicubic" in name:
             return "bicubic"
         if "unknown" in name:
             return "unknown"
+        if "esp32" in name:
+            return "esp32"
     return ""
 
 
@@ -99,22 +101,6 @@ def collect_hr_items(
         if lrs:
             items.append((hr, lrs))
     return items
-
-
-def collect_hr_files(
-    hr_dir: str | Path,
-    exts: Iterable[str] = IMG_EXTS,
-) -> list[Path]:
-    """Return image files in ``hr_dir`` (no LR pairing required)."""
-    hr_dir = Path(hr_dir)
-    exts = {e.lower() for e in exts}
-    if not hr_dir.is_dir():
-        return []
-    return [
-        p
-        for p in sorted(hr_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in exts
-    ]
 
 
 class SRTrainDataset(Dataset):
@@ -289,184 +275,3 @@ def _to_numpy(img: Image.Image):
 
     # np.array copies, avoiding the non-writable-array warning from torch.
     return np.array(img, dtype="uint8")
-
-
-class ESP32SRTrainDataset(Dataset):
-    """On-the-fly ESP32 degradation for training patches.
-
-    A larger HR region is cropped first (``margin`` LR pixels of context on
-    each side), degraded as a whole, and then centre-cropped back to the
-    requested LR patch size.  This reduces blur/ghost/vignette boundary
-    artifacts compared with degrading each patch in isolation.
-
-    Every access draws a fresh profile and seed, so the same HR patch is seen
-    with different realistic degradations in different epochs.
-    """
-
-    def __init__(
-        self,
-        hr_paths: Sequence[Path],
-        scale: int = 4,
-        patch_size: int = 192,
-        margin: int = 8,
-        version: str = "v1",
-        severity: float = 1.0,
-        augment: bool = True,
-        seed: int | None = None,
-        profiles: Sequence[str] | None = None,
-    ) -> None:
-        if patch_size % scale != 0:
-            raise ValueError(
-                f"patch_size ({patch_size}) must be divisible by scale ({scale})"
-            )
-        self.hr_paths = list(hr_paths)
-        self.scale = scale
-        self.patch_size = patch_size
-        self.lr_patch_size = patch_size // scale
-        self.margin = max(0, int(margin))
-        self.version = version
-        self.severity = float(severity)
-        self.augment = augment
-        self.seed = int(seed if seed is not None else random.randrange(0, 2**31 - 1))
-        self.profiles = tuple(profiles) if profiles else None
-        self._rng = random.Random(self.seed + 7919)
-        self._worker_id = -1
-
-    def __len__(self) -> int:
-        return len(self.hr_paths)
-
-    def _worker_rng(self) -> random.Random:
-        info = torch.utils.data.get_worker_info()
-        worker_id = info.id if info is not None else 0
-        if worker_id != self._worker_id:
-            self._rng = random.Random(self.seed + 104729 * (worker_id + 1))
-            self._worker_id = worker_id
-        return self._rng
-
-    def _augment_pair(self, hr: Image.Image, lr: Image.Image) -> tuple[Image.Image, Image.Image]:
-        rng = self._worker_rng()
-        if rng.random() < 0.5:
-            hr = hr.transpose(Image.FLIP_LEFT_RIGHT)
-            lr = lr.transpose(Image.FLIP_LEFT_RIGHT)
-        if rng.random() < 0.5:
-            hr = hr.transpose(Image.FLIP_TOP_BOTTOM)
-            lr = lr.transpose(Image.FLIP_TOP_BOTTOM)
-        k = rng.randint(0, 3)
-        if k:
-            hr = hr.rotate(90 * k, expand=True)
-            lr = lr.rotate(90 * k, expand=True)
-        return hr, lr
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        from .degrade import degrade_patch
-
-        rng = self._worker_rng()
-        path = self.hr_paths[idx]
-        hr = _load_rgb(path)
-
-        margin_hr = self.margin * self.scale
-        region_size = self.patch_size + 2 * margin_hr
-        if hr.width < region_size or hr.height < region_size:
-            hr = hr.resize(
-                (max(hr.width, region_size), max(hr.height, region_size)),
-                Image.BICUBIC,
-            )
-
-        x = rng.randint(0, hr.width - region_size)
-        y = rng.randint(0, hr.height - region_size)
-        region = hr.crop((x, y, x + region_size, y + region_size))
-
-        profile = rng.choice(self.profiles) if self.profiles else None
-        seed = rng.randrange(0, 2**31 - 1)
-        lr_region, _ = degrade_patch(
-            region,
-            version=self.version,
-            seed=seed,
-            profile=profile,
-            scale=self.scale,
-            severity=self.severity,
-            output_lr_size=(
-                self.lr_patch_size + 2 * self.margin,
-                self.lr_patch_size + 2 * self.margin,
-            ),
-        )
-        lr_patch = lr_region.crop(
-            (
-                self.margin,
-                self.margin,
-                self.margin + self.lr_patch_size,
-                self.margin + self.lr_patch_size,
-            )
-        )
-        hr_patch = region.crop(
-            (
-                margin_hr,
-                margin_hr,
-                margin_hr + self.patch_size,
-                margin_hr + self.patch_size,
-            )
-        )
-
-        if self.augment:
-            hr_patch, lr_patch = self._augment_pair(hr_patch, lr_patch)
-
-        lr_t = torch.from_numpy(_to_numpy(lr_patch)).permute(2, 0, 1).float() / 255.0
-        hr_t = torch.from_numpy(_to_numpy(hr_patch)).permute(2, 0, 1).float() / 255.0
-        return lr_t, hr_t
-
-
-class ESP32SRValDataset(Dataset):
-    """Deterministic full-image ESP32 degradation for validation.
-
-    The profile cycles through the version's profile list and the seed is
-    derived from the image index, so PSNR is comparable across epochs.
-    """
-
-    def __init__(
-        self,
-        hr_paths: Sequence[Path],
-        scale: int = 4,
-        version: str = "v1",
-        severity: float = 1.0,
-        seed: int = 42,
-        profiles: Sequence[str] | None = None,
-    ) -> None:
-        from .degrade import profile_names
-
-        self.hr_paths = list(hr_paths)
-        self.scale = scale
-        self.version = version
-        self.severity = float(severity)
-        self.seed = int(seed)
-        names = tuple(profiles) if profiles else profile_names(version)
-        if not names:
-            raise ValueError("no degradation profiles available")
-        self.profiles = names
-
-    def __len__(self) -> int:
-        return len(self.hr_paths)
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, str]:
-        from .degrade import degrade_image
-
-        path = self.hr_paths[idx]
-        hr = _load_rgb(path)
-        profile = self.profiles[idx % len(self.profiles)]
-        seed = self.seed + idx * 1000003
-        lr, _ = degrade_image(
-            hr,
-            version=self.version,
-            seed=seed,
-            profile=profile,
-            scale=self.scale,
-            severity=self.severity,
-        )
-
-        lw, lh = lr.size
-        ew, eh = lw * self.scale, lh * self.scale
-        if hr.size != (ew, eh):
-            hr = hr.crop((0, 0, ew, eh))
-
-        lr_t = torch.from_numpy(_to_numpy(lr)).permute(2, 0, 1).float() / 255.0
-        hr_t = torch.from_numpy(_to_numpy(hr)).permute(2, 0, 1).float() / 255.0
-        return lr_t, hr_t, f"esp32/{profile}/{path.name}"

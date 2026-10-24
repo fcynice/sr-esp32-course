@@ -6,8 +6,8 @@
 - 某个冻结退化版本（如 `v1`）生成的模拟 LR
 - `data/esp32_camera/data01` 中的真实 ESP32 摄像头图片
 
-服务只读取审查目录，不会修改图片，也不参与训练。训练使用同一退化版本在
-`train.py` 中实时生成 LR patch。
+服务只读取审查目录，不会修改图片，也不参与训练。当前训练读取由
+`superresolution.degrade` 离线生成的 ESP32 LR 数据集。
 
 ## 启动
 
@@ -38,28 +38,13 @@ nohup uv run python -m servers.degrade_review_server --host 127.0.0.1 --port 800
 
 ## 审查图从哪里来
 
-先运行退化审查生成器：
+服务读取 `data/esp32_degrade_review/<session>/` 下的 `manifest.json` /
+`manifest.jsonl`。当前 `superresolution.degrade` 已改为生成训练用 ESP32 LR
+数据集（见 `src/superresolution/degrade/README.md`），不再生成新的 review
+session。
 
-```bash
-# 全部 9 个 profile，每个 profile 在 DIV2K / Flickr2K 各抽 2 张 -> 36 张
-uv run python -m superresolution.degrade --per-profile 2 --seed 42
-```
-
-生成目录结构：
-
-```text
-data/esp32_degrade_review/
-└── v1_YYYYMMDD_HHMMSS/
-    ├── manifest.json          # session 元信息
-    ├── manifest.jsonl         # 每张图：源 HR、profile、seed、参数、统计
-    ├── summary.json           # 与 data01 参考统计的对比
-    ├── images/
-    │   ├── div2k/train/<stem>__<profile>__s<seed>.png
-    │   └── flickr2k/train/...
-    └── previews/
-        ├── contact_sheet.jpg
-        └── reference_sheet.jpg
-```
+已有的历史 session（例如 `v1_review_20261020/`）仍可直接查看。若后续需要新的
+审查 session，可以复用同一 manifest 格式单独生成；服务端代码无需改动。
 
 ## 接口
 

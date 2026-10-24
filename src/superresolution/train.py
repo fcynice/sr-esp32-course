@@ -26,18 +26,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .dataset import (
-    ESP32SRTrainDataset,
-    ESP32SRValDataset,
     SRMixTrainDataset,
     SRValDataset,
-    collect_hr_files,
     collect_hr_items,
     lr_type_of,
 )
-from .degrade import DEFAULT_VERSION as DEFAULT_DEGRADE_VERSION
-from .degrade import fingerprint as degrade_fingerprint
-from .degrade import list_versions as list_degrade_versions
-from .degrade import profile_names as degrade_profile_names
 from .model import build_model, model_kwargs_for
 
 # ---------------------------------------------------------------------------
@@ -123,48 +116,6 @@ def build_datasets(args: argparse.Namespace):
         return pairs
 
     return train_groups, flatten(val_groups, val_types)
-
-
-def build_esp32_sources(args: argparse.Namespace) -> tuple[list[Path], list[Path]]:
-    """Return HR-only train/val lists for on-the-fly ESP32 degradation.
-
-    The split mirrors the existing paired pipeline: DIV2K train is fully used
-    for training, 5% of Flickr2K HR images are held out, and DIV2K valid is
-    the dedicated validation set.
-    """
-    root = Path(args.data_root)
-    rng = random.Random(args.seed)
-    train: list[Path] = []
-    val: list[Path] = []
-
-    for hr_rel, _, val_frac in TRAIN_SOURCES:
-        items = collect_hr_files(root / hr_rel)
-        if not items:
-            raise FileNotFoundError(f"No HR images found for {hr_rel}")
-        rng.shuffle(items)
-        n_val = int(len(items) * val_frac)
-        val.extend(items[:n_val])
-        train.extend(items[n_val:])
-
-    for hr_rel, _, _ in VAL_SOURCES:
-        items = collect_hr_files(root / hr_rel)
-        if not items:
-            raise FileNotFoundError(f"No HR images found for {hr_rel}")
-        val.extend(items)
-
-    return train, val
-
-
-def resolve_degrade_profiles(args: argparse.Namespace) -> tuple[str, ...] | None:
-    raw = getattr(args, "degrade_profiles", "") or ""
-    available = degrade_profile_names(args.degrade_version)
-    requested = tuple(x.strip() for x in raw.split(",") if x.strip())
-    if not requested:
-        return None
-    missing = [p for p in requested if p not in available]
-    if missing:
-        raise ValueError(f"unknown degradation profiles: {missing}; available: {available}")
-    return requested
 
 
 # ---------------------------------------------------------------------------
@@ -261,34 +212,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         choices=["bicubic", "unknown", "both", "esp32"],
         help=(
             "bicubic = clean downscale; unknown = realistic degradation; "
-            "both = mix both LR variants; esp32 = on-the-fly versioned ESP32 "
-            "degradation (no pre-generated LR files)"
+            "both = mix bicubic and unknown; esp32 = pre-generated ESP32 LR "
+            "under DIV2K_train_LR_esp32 / Flickr2K_LR_esp32"
         ),
-    )
-    p.add_argument(
-        "--degrade-version",
-        type=str,
-        default=DEFAULT_DEGRADE_VERSION,
-        choices=list(list_degrade_versions()),
-        help="frozen ESP32 degradation model version (used with --lr-type esp32)",
-    )
-    p.add_argument(
-        "--degrade-margin",
-        type=int,
-        default=8,
-        help="LR-pixel context margin around training patches (--lr-type esp32)",
-    )
-    p.add_argument(
-        "--degrade-severity",
-        type=float,
-        default=1.0,
-        help="global degradation strength multiplier (--lr-type esp32)",
-    )
-    p.add_argument(
-        "--degrade-profiles",
-        type=str,
-        default="",
-        help="comma-separated profile subset for training/validation (default: all)",
     )
     p.add_argument("--patch-size", type=int, default=192, help="HR patch size")
     p.add_argument("--batch-size", type=int, default=16)
@@ -377,105 +303,50 @@ def main(argv=None) -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     use_amp = (not args.no_amp) and device.type == "cuda"
 
-    degrade_profiles = resolve_degrade_profiles(args)
+    train_groups, val_pairs = build_datasets(args)
+    if args.max_train_items > 0:
+        train_groups = train_groups[: args.max_train_items]
+    if args.max_val_items > 0:
+        val_pairs = val_pairs[: args.max_val_items]
 
-    if args.lr_type == "esp32":
-        train_hrs, val_hrs = build_esp32_sources(args)
-        if args.max_train_items > 0:
-            train_hrs = train_hrs[: args.max_train_items]
-        if args.max_val_items > 0:
-            val_hrs = val_hrs[: args.max_val_items]
+    repeats = len(requested_types(args.lr_type))
+    print(
+        f"lr type: {args.lr_type} | train HRs: {len(train_groups)} "
+        f"(x{repeats} = {len(train_groups) * repeats} samples) | "
+        f"val pairs: {len(val_pairs)}"
+    )
 
-        repeats = 1
-        profile_text = ",".join(degrade_profiles) if degrade_profiles else "all"
-        print(
-            f"lr type: esp32 | degrade: {args.degrade_version} "
-            f"(margin={args.degrade_margin}, severity={args.degrade_severity}, "
-            f"profiles={profile_text}) | train HRs: {len(train_hrs)} | "
-            f"val HRs: {len(val_hrs)}"
-        )
+    train_ds = SRMixTrainDataset(
+        train_groups,
+        scale=args.scale,
+        patch_size=args.patch_size,
+        augment=not args.no_augment,
+        seed=args.seed,
+        repeats=repeats,
+    )
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=args.num_workers > 0,
+    )
 
-        train_ds = ESP32SRTrainDataset(
-            train_hrs,
-            scale=args.scale,
-            patch_size=args.patch_size,
-            margin=args.degrade_margin,
-            version=args.degrade_version,
-            severity=args.degrade_severity,
-            augment=not args.no_augment,
-            seed=args.seed,
-            profiles=degrade_profiles,
-        )
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
+    val_by_type: dict[str, list[tuple[Path, Path]]] = {}
+    for hr, lr in val_pairs:
+        val_by_type.setdefault(lr_type_of(lr), []).append((hr, lr))
+    val_loaders = {
+        lr_type: DataLoader(
+            SRValDataset(pairs, scale=args.scale),
+            batch_size=1,
+            shuffle=False,
+            num_workers=min(2, args.num_workers),
             pin_memory=True,
-            drop_last=True,
-            persistent_workers=args.num_workers > 0,
         )
-        val_loaders = {
-            "esp32": DataLoader(
-                ESP32SRValDataset(
-                    val_hrs,
-                    scale=args.scale,
-                    version=args.degrade_version,
-                    severity=args.degrade_severity,
-                    seed=args.seed,
-                    profiles=degrade_profiles,
-                ),
-                batch_size=1,
-                shuffle=False,
-                num_workers=min(2, args.num_workers),
-                pin_memory=True,
-            )
-        }
-    else:
-        train_groups, val_pairs = build_datasets(args)
-        if args.max_train_items > 0:
-            train_groups = train_groups[: args.max_train_items]
-        if args.max_val_items > 0:
-            val_pairs = val_pairs[: args.max_val_items]
-
-        repeats = len(requested_types(args.lr_type))
-        print(
-            f"lr type: {args.lr_type} | train HRs: {len(train_groups)} "
-            f"(x{repeats} = {len(train_groups) * repeats} samples) | "
-            f"val pairs: {len(val_pairs)}"
-        )
-
-        train_ds = SRMixTrainDataset(
-            train_groups,
-            scale=args.scale,
-            patch_size=args.patch_size,
-            augment=not args.no_augment,
-            seed=args.seed,
-            repeats=repeats,
-        )
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-            pin_memory=True,
-            drop_last=True,
-            persistent_workers=args.num_workers > 0,
-        )
-
-        val_by_type: dict[str, list[tuple[Path, Path]]] = {}
-        for hr, lr in val_pairs:
-            val_by_type.setdefault(lr_type_of(lr), []).append((hr, lr))
-        val_loaders = {
-            lr_type: DataLoader(
-                SRValDataset(pairs, scale=args.scale),
-                batch_size=1,
-                shuffle=False,
-                num_workers=min(2, args.num_workers),
-                pin_memory=True,
-            )
-            for lr_type, pairs in val_by_type.items()
-        }
+        for lr_type, pairs in val_by_type.items()
+    }
 
     arch_kwargs = model_kwargs_for(args.model, args)
     model = build_model(args.model, **arch_kwargs).to(device)
@@ -505,17 +376,6 @@ def main(argv=None) -> None:
                     "scale": args.scale,
                     "model": args.model,
                     "model_kwargs": arch_kwargs,
-                    "degrade_version": (
-                        args.degrade_version if args.lr_type == "esp32" else None
-                    ),
-                    "degrade_fingerprint": (
-                        degrade_fingerprint(args.degrade_version)
-                        if args.lr_type == "esp32"
-                        else None
-                    ),
-                    "degrade_profiles": (
-                        list(degrade_profiles) if degrade_profiles else None
-                    ),
                 },
                 indent=2,
             )

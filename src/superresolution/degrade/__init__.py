@@ -4,21 +4,24 @@ Public API
 ----------
 ``degrade_image``
     Degrade a full HR PIL image and return ``(LR PIL image, spec dict)``.
-``degrade_patch``
-    Degrade an HR region and center-crop to a requested LR size.  Used by the
-    on-the-fly training dataset.
-``PROFILES`` / ``profile_names``
-    Introspection used by the review CLI and visualiser.
+``fingerprint``
+    SHA-256 of the frozen version module and shared low-level ops.
+``profile_names`` / ``profile_weights``
+    Introspection used by the dataset generator.
 
 Every degradation model is a separate module (``v1``, ``v2``, ...).  A version
 that has been reviewed is frozen; new tuning means a new version module.
+
+The package is intentionally batch-oriented: it writes pre-generated LR files
+for the normal paired training pipeline.  It does not expose an on-the-fly
+patch API.
 """
+
 
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 from PIL import Image
@@ -48,10 +51,11 @@ def get_version(version: str = DEFAULT_VERSION):
 def fingerprint(version: str = DEFAULT_VERSION) -> str:
     """SHA-256 of the frozen version module and shared low-level ops.
 
-    Stored in review manifests and training run metadata so a session can be
-    tied to the exact code that produced it.  If this value changes for an old
+    Stored in dataset manifests and training run metadata so files can be tied
+    to the exact code that produced them.  If this value changes for an old
     version, that version was modified and is no longer reproducible.
     """
+
     module = get_version(version)
     digest = hashlib.sha256()
     for raw in (getattr(module, "__file__", None), getattr(ops, "__file__", None)):
@@ -79,9 +83,8 @@ def degrade_image(
     profile: str | None = None,
     scale: int = 4,
     severity: float = 1.0,
-    output_lr_size: tuple[int, int] | None = None,
 ) -> tuple[Image.Image, dict[str, object]]:
-    """Degrade a full HR image.
+    """Degrade a full HR image to ``floor(HR / scale)``.
 
     Parameters
     ----------
@@ -95,12 +98,9 @@ def degrade_image(
     profile:
         Force a profile; when ``None`` a weighted random profile is chosen.
     scale:
-        Integer downscale factor.  LR size is ``floor(HR / scale)`` unless
-        ``output_lr_size`` is given.
+        Integer downscale factor.
     severity:
         Global strength multiplier (1.0 = reviewed default).
-    output_lr_size:
-        Optional centre-crop target in LR pixels.  Used by patch training.
     """
     module = get_version(version)
     rng = np.random.default_rng(int(seed))
@@ -110,51 +110,4 @@ def degrade_image(
     spec["scale"] = int(scale)
     spec["seed"] = int(seed)
     out = module.run(img, spec, rng, scale=scale)
-
-    if output_lr_size is not None:
-        tw, th = int(output_lr_size[0]), int(output_lr_size[1])
-        if tw <= 0 or th <= 0:
-            raise ValueError(f"invalid output_lr_size: {output_lr_size}")
-        if out.width < tw or out.height < th:
-            raise ValueError(
-                f"degraded image {out.size} smaller than requested centre crop {(tw, th)}"
-            )
-        left = (out.width - tw) // 2
-        top = (out.height - th) // 2
-        out = out.crop((left, top, left + tw, top + th))
     return out, spec
-
-
-def degrade_patch(
-    hr_region: Image.Image,
-    *,
-    version: str = DEFAULT_VERSION,
-    seed: int = 0,
-    profile: str | None = None,
-    scale: int = 4,
-    severity: float = 1.0,
-    output_lr_size: tuple[int, int] | None = None,
-) -> tuple[Image.Image, dict[str, object]]:
-    """Alias with a clearer name for training-time patch degradation."""
-    return degrade_image(
-        hr_region,
-        version=version,
-        seed=seed,
-        profile=profile,
-        scale=scale,
-        severity=severity,
-        output_lr_size=output_lr_size,
-    )
-
-
-def choose_profiles_for_review(
-    version: str = DEFAULT_VERSION,
-    requested: Iterable[str] | None = None,
-) -> list[str]:
-    available = list(profile_names(version))
-    if requested is None:
-        return available
-    wanted = [p for p in requested if p in available]
-    if not wanted:
-        raise ValueError(f"no valid profiles in {list(requested)!r}; available: {available}")
-    return wanted

@@ -85,9 +85,10 @@ bash scripts/download_div2k_lr.sh    # 下载 DIV2K 的 LR 归档 (bicubic + unk
 > 验证默认覆盖训练所用的全部 LR 类型（`both` 时同时报告 bicubic / unknown 的 PSNR），
 > 控制台会显示分项：`val_psnr=... (bicubic=..., unknown=...)`。
 >
-> 新增 `--lr-type esp32`：不依赖预生成 LR，训练时从 HR 随机取 patch，并用冻结版本的
-> ESP32 退化模型实时生成 LR。数据划分仍为 DIV2K train + Flickr2K 95% 训练、
-> DIV2K valid + Flickr2K 5% 验证。详见 [degrade/README.md](src/superresolution/degrade/README.md)。
+> 新增 `--lr-type esp32`：先用 `python -m superresolution.degrade` 把退化 LR 生成到
+> `DIV2K_train_LR_esp32/X4` 等目录，再像 `bicubic` / `unknown` 一样走原有对齐裁剪训练。
+> 数据划分仍为 DIV2K train + Flickr2K 95% 训练、DIV2K valid + Flickr2K 5% 验证。
+> 详见 [degrade/README.md](src/superresolution/degrade/README.md)。
 
 ### bicubic vs unknown（实测参考）
 
@@ -150,11 +151,7 @@ train-sr --model edsr --epochs 150
 | `--output-dir` | `runs` | 输出目录 |
 | `--model` | `edsr` | `espcn` 或 `edsr` |
 | `--scale` | `4` | 放大倍数（2/3/4/8） |
-| `--lr-type` | `both` | `bicubic` / `unknown` / `both` / `esp32`（实时退化，见 degrade README） |
-| `--degrade-version` | `v1` | ESP32 退化模型版本（`--lr-type esp32`） |
-| `--degrade-margin` | `8` | patch 退化的 LR 上下文边距（`--lr-type esp32`） |
-| `--degrade-severity` | `1.0` | 退化整体强度（`--lr-type esp32`） |
-| `--degrade-profiles` | 空 | 逗号分隔的 profile 子集，空表示全部（`--lr-type esp32`） |
+| `--lr-type` | `both` | `bicubic` / `unknown` / `both` / `esp32`（读取预生成 ESP32 LR） |
 | `--patch-size` | `192` | HR 训练块大小（须能被 scale 整除，X4 对应 LR 48×48） |
 | `--batch-size` | `16` | 批大小 |
 | `--epochs` | `100` | 训练轮数 |
@@ -249,11 +246,22 @@ checkpoint（`best.pth` / `last.pth`）是**自描述**的，内部保存了 `mo
 
 ## 新增接口
 
-- **ESP32 实时退化训练**：`--lr-type esp32`，不读取预生成 LR；主要参数
-  `--degrade-version` / `--degrade-margin` / `--degrade-severity` / `--degrade-profiles`。
-  详细策略见 [src/superresolution/degrade/README.md](src/superresolution/degrade/README.md)。
-- **审查图生成**：`python -m superresolution.degrade --per-profile 2 --seed 42`，
-  输出到 `data/esp32_degrade_review/`。
+- **生成 ESP32 LR 数据集**：
+
+  ```bash
+  python -m superresolution.degrade --version v1 --scale 4
+  ```
+
+  输出到 `data/DIV2K/DIV2K_train_LR_esp32/X4`、`DIV2K_valid_LR_esp32/X4`、
+  `data/Flickr2K/Flickr2K_LR_esp32/X4`。支持 `--profiles`、`--severity`、
+  `--splits`、`--output-format`、`--workers`、`--dry-run` 等参数。详见
+  [src/superresolution/degrade/README.md](src/superresolution/degrade/README.md)。
+- **ESP32 LR 训练**：生成后使用 `--lr-type esp32`，走原有对齐裁剪流程：
+
+  ```bash
+  python -m superresolution.train --model edsr --lr-type esp32 \
+    --patch-size 192 --batch-size 16 --epochs 150
+  ```
 - **退化审查可视化**：`python -m servers.degrade_review_server --port 8002`，
   文档见 [servers/degrade_review_server/README.md](servers/degrade_review_server/README.md)。
 - **超分推理可视化**：`python -m servers.sr_infer_server --port 8001`，
@@ -275,8 +283,8 @@ LR 起点 = (y, x)               LR 块 = (patch/scale, patch/scale)
 ```
 src/superresolution/
 ├── model.py      # ESPCN / EDSR 网络
-├── dataset.py    # 对齐切割、bicubic/unknown 混合、ESP32 实时退化数据集
-├── degrade/      # 版本化 ESP32 退化模型 + 审查图 CLI
+├── dataset.py    # 对齐切割、bicubic/unknown 混合数据集
+├── degrade/      # 版本化 ESP32 退化模型 + LR 数据集生成 CLI
 ├── train.py      # 训练 / 验证 / 断点续训
 └── infer.py      # 推理
 servers/          # 本地可视化服务（SR 推理 / 退化审查）

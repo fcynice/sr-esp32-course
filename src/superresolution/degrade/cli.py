@@ -1,56 +1,90 @@
-"""Review-image generator for ESP32 degradation models.
+"""Generate pre-computed ESP32 LR datasets for paired training.
+
+The output follows the existing data layout, so ``train.py --lr-type esp32``
+uses the normal aligned HR/LR pipeline::
+
+    data/DIV2K/DIV2K_train_LR_esp32/X4/0001x4.png
+    data/DIV2K/DIV2K_valid_LR_esp32/X4/0801x4.png
+    data/Flickr2K/Flickr2K_LR_esp32/X4/000001x4.png
 
 Examples
 --------
-List frozen profiles::
+Generate all three splits with the frozen v1 model::
 
-    python -m superresolution.degrade --list-profiles
+    python -m superresolution.degrade --version v1 --scale 4
 
-Generate a stratified review session (2 images per profile per dataset)::
+Generate a small test batch::
 
-    python -m superresolution.degrade --per-profile 2 --seed 42
+    python -m superresolution.degrade --splits div2k_valid --max-items 10
 
-The output is intentionally *not* used by training.  Training uses the same
-frozen version on the fly; these files exist only for human review.
+Generate JPEG instead of the default PNG::
+
+    python -m superresolution.degrade --output-format jpg
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import random
-import shutil
 import sys
+import zlib
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 from tqdm import tqdm
 
-from . import DEFAULT_VERSION, degrade_image, fingerprint, get_version, list_versions, profile_names
+from . import (
+    DEFAULT_VERSION,
+    degrade_image,
+    fingerprint,
+    get_version,
+    list_versions,
+    profile_names,
+    profile_weights,
+)
 from .stats import image_stats, summarize
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
-SOURCES = {
+# HR directory -> LR directory (without the X{scale} suffix).
+SPLITS: dict[str, dict[str, str]] = {
     "div2k_train": {
-        "group": "div2k",
-        "split": "train",
-        "hr_dir": "DIV2K/DIV2K_train_HR",
+        "hr": "DIV2K/DIV2K_train_HR",
+        "lr": "DIV2K/DIV2K_train_LR_esp32",
+        "profile_mode": "weighted",
     },
     "div2k_valid": {
-        "group": "div2k",
-        "split": "valid",
-        "hr_dir": "DIV2K/DIV2K_valid_HR",
+        "hr": "DIV2K/DIV2K_valid_HR",
+        "lr": "DIV2K/DIV2K_valid_LR_esp32",
+        "profile_mode": "cycle",
     },
-    "flickr2k_train": {
-        "group": "flickr2k",
-        "split": "train",
-        "hr_dir": "Flickr2K/Flickr2K_HR",
+    "flickr2k": {
+        # All 2650 HR images.  train.py keeps its existing 95/5 HR-level split.
+        "hr": "Flickr2K/Flickr2K_HR",
+        "lr": "Flickr2K/Flickr2K_LR_esp32",
+        "profile_mode": "weighted",
     },
 }
+
+
+@dataclass(frozen=True)
+class Task:
+    source: Path
+    target: Path
+    source_rel: str
+    target_rel: str
+    split: str
+    profile: str
+    seed: int
+    version: str
+    scale: int
+    severity: float
+    output_format: str
 
 
 def _relative(path: Path) -> str:
@@ -77,221 +111,226 @@ def collect_hr_files(hr_dir: Path) -> list[Path]:
     ]
 
 
-def _collect_pools(data_root: Path, dataset_names: list[str]) -> dict[str, list[dict[str, object]]]:
-    pools: dict[str, list[dict[str, object]]] = {}
-    for source_name, meta in SOURCES.items():
-        group = str(meta["group"])
-        if group not in dataset_names:
-            continue
-        hr_dir = data_root / str(meta["hr_dir"])
+def _seed_for(base_seed: int, source_rel: str) -> int:
+    # Stable across runs and independent of worker scheduling.
+    return (int(base_seed) * 1_000_003 + zlib.crc32(source_rel.encode("utf-8"))) & 0x7FFFFFFF
+
+
+def _sample_profile(
+    rng: np.random.Generator,
+    profiles: list[str],
+    weights: dict[str, float],
+) -> str:
+    values = np.array([weights[p] for p in profiles], dtype=np.float64)
+    values /= values.sum()
+    return str(rng.choice(profiles, p=values))
+
+
+def _process_one(task: Task) -> dict[str, object]:
+    try:
+        with Image.open(task.source) as im:
+            hr = im.convert("RGB")
+        lr, spec = degrade_image(
+            hr,
+            version=task.version,
+            seed=task.seed,
+            profile=task.profile,
+            scale=task.scale,
+            severity=task.severity,
+        )
+        task.target.parent.mkdir(parents=True, exist_ok=True)
+        if task.output_format == "jpg":
+            # The degradation already includes a JPEG round-trip; use a high
+            # quality here to avoid adding strong second-generation artifacts.
+            lr.save(task.target, format="JPEG", quality=95, subsampling=0)
+        else:
+            lr.save(task.target, format="PNG")
+
+        stats = image_stats(lr)
+        record = {
+            "split": task.split,
+            "source": task.source_rel,
+            "lr": task.target_rel,
+            "profile": task.profile,
+            "version": task.version,
+            "scale": task.scale,
+            "severity": task.severity,
+            "seed": task.seed,
+            "spec": spec,
+            "stats": stats,
+        }
+        return {"ok": True, "record": record}
+    except Exception as exc:  # noqa: BLE001 - report per-file failures
+        return {"ok": False, "source": str(task.source), "error": repr(exc)}
+
+
+def _build_tasks(
+    args: argparse.Namespace,
+    data_root: Path,
+    profiles: list[str],
+    weights: dict[str, float],
+) -> tuple[list[Task], dict[str, dict[str, int]]]:
+    splits = [x.strip() for x in args.splits.split(",") if x.strip()]
+    unknown = [x for x in splits if x not in SPLITS]
+    if unknown:
+        raise SystemExit(f"unknown splits: {unknown}; available: {list(SPLITS)}")
+
+    tasks: list[Task] = []
+    counts: dict[str, dict[str, int]] = {}
+    for split in splits:
+        meta = SPLITS[split]
+        hr_dir = data_root / meta["hr"]
+        lr_dir = data_root / meta["lr"] / f"X{args.scale}"
         files = collect_hr_files(hr_dir)
         if not files:
             print(f"warning: no HR files in {hr_dir}", file=sys.stderr)
+            counts[split] = {"total": 0, "queued": 0, "skipped": 0}
             continue
-        for path in files:
-            pools.setdefault(group, []).append(
-                {
-                    "source_name": source_name,
-                    "group": group,
-                    "split": str(meta["split"]),
-                    "path": path,
-                }
+        if args.max_items > 0:
+            files = files[: args.max_items]
+
+        mode = args.profile_mode if args.profile_mode != "auto" else meta["profile_mode"]
+        queued = 0
+        skipped = 0
+        for index, source in enumerate(files):
+            source_rel = _relative(source)
+            seed = _seed_for(args.seed, source_rel)
+            if mode == "cycle":
+                profile = profiles[index % len(profiles)]
+            else:
+                profile = _sample_profile(np.random.default_rng(seed), profiles, weights)
+
+            target = lr_dir / f"{source.stem}x{args.scale}.{args.output_format}"
+            if target.exists() and not args.overwrite:
+                skipped += 1
+                continue
+            tasks.append(
+                Task(
+                    source=source,
+                    target=target,
+                    source_rel=source_rel,
+                    target_rel=_relative(target),
+                    split=split,
+                    profile=profile,
+                    seed=seed,
+                    version=args.version,
+                    scale=args.scale,
+                    severity=args.severity,
+                    output_format=args.output_format,
+                )
             )
-    return pools
+            queued += 1
+        counts[split] = {"total": len(files), "queued": queued, "skipped": skipped}
+    return tasks, counts
 
 
-def _pick_records(
-    pools: dict[str, list[dict[str, object]]],
-    profiles: list[str],
-    per_profile: int,
-    rng: random.Random,
-) -> list[dict[str, object]]:
-    # Shuffle copies so every profile gets different HR images across the run.
-    remaining = {group: list(items) for group, items in pools.items()}
-    for items in remaining.values():
-        rng.shuffle(items)
-
-    records: list[dict[str, object]] = []
-    groups = [g for g in ("div2k", "flickr2k") if g in remaining]
-    for profile in profiles:
-        for group in groups:
-            items = remaining.get(group, [])
-            if len(items) < per_profile:
-                raise RuntimeError(
-                    f"not enough unused HR images for group={group}: "
-                    f"need {per_profile}, have {len(items)}"
-                )
-            chosen = [items.pop() for _ in range(per_profile)]
-            for item in chosen:
-                seed = rng.randrange(0, 2**31 - 1)
-                records.append(
-                    {
-                        **item,
-                        "profile": profile,
-                        "seed": seed,
-                    }
-                )
-    return records
-
-
-def _output_name(record: dict[str, object]) -> str:
-    path = Path(str(record["path"]))
-    return f"{path.stem}__{record['profile']}__s{record['seed']}.png"
-
-
-def _make_contact_sheet(
-    items: list[tuple[Path, str]],
-    output: Path,
-    *,
-    columns: int = 6,
-    tile_size: tuple[int, int] = (260, 190),
-) -> None:
-    if not items:
-        return
-    tw, th = tile_size
-    label_h = 26
-    rows = (len(items) + columns - 1) // columns
-    sheet = Image.new("RGB", (columns * tw, rows * (th + label_h)), (18, 18, 20))
-    draw = ImageDraw.Draw(sheet)
-    for idx, (path, label) in enumerate(items):
-        row, col = divmod(idx, columns)
-        x, y = col * tw, row * (th + label_h)
-        try:
-            with Image.open(path) as im:
-                im = im.convert("RGB")
-                im.thumbnail((tw - 8, th - 8), Image.Resampling.LANCZOS)
-                ox = x + (tw - im.width) // 2
-                oy = y + (th - im.height) // 2
-                sheet.paste(im, (ox, oy))
-        except Exception as exc:  # noqa: BLE001
-            draw.text((x + 6, y + 6), f"read error: {exc}", fill=(255, 120, 120))
-        draw.text((x + 5, y + th + 4), label[:42], fill=(210, 210, 210))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    sheet.save(output, quality=92)
-
-
-def _reference_files(reference_dir: Path) -> list[Path]:
-    return sorted(
-        p
-        for p in reference_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-    )
-
-
-def _compute_reference_stats(reference_dir: Path) -> dict[str, object]:
-    files = _reference_files(reference_dir)
-    if not files:
-        return {}
-    rows: list[dict[str, float | int]] = []
-    for path in files:
-        try:
-            with Image.open(path) as im:
-                rows.append(image_stats(im))
-        except Exception:  # noqa: BLE001
-            continue
-    return {
-        "dir": _relative(reference_dir),
-        "count": len(rows),
-        "stats": summarize(rows),
-    }
-
-
-def _new_session_dir(root: Path, name: str | None, overwrite: bool = False, prefix: str = "") -> Path:
-    if name:
-        if Path(name).name != name or name in {".", ".."}:
-            raise ValueError(f"invalid session name: {name!r}")
-        session = root / name
-        if session.exists():
-            if not overwrite:
-                raise FileExistsError(f"session already exists: {session}")
-            shutil.rmtree(session)
-        return session
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"{prefix}_{stamp}" if prefix else stamp
-    session = root / base
-    idx = 1
-    while session.exists():
-        session = root / f"{base}_{idx:02d}"
-        idx += 1
-    return session
-
-
-def _write_manifest_header(
-    session: Path,
+def _write_manifest(
+    manifest_dir: Path,
     args: argparse.Namespace,
     profiles: list[str],
     records: list[dict[str, object]],
+    counts: dict[str, dict[str, int]],
+    errors: list[dict[str, object]],
 ) -> None:
+    manifest_dir.mkdir(parents=True, exist_ok=True)
     header = {
-        "session": session.name,
         "created": datetime.now().isoformat(timespec="seconds"),
         "version": args.version,
         "fingerprint": fingerprint(args.version),
         "scale": args.scale,
         "severity": args.severity,
         "seed": args.seed,
-        "per_profile": args.per_profile,
         "profiles": profiles,
-        "record_count": len(records),
-        "source_counts": {},
-        "note": (
-            "Human-review images only. Training uses the same frozen degradation "
-            "version on the fly and does not read this folder."
-        ),
+        "profile_mode": args.profile_mode,
+        "output_format": args.output_format,
+        "counts": counts,
+        "generated": len(records),
+        "errors": len(errors),
+        "outputs": {
+            split: f"{meta['lr']}/X{args.scale}" for split, meta in SPLITS.items()
+        },
     }
-    counts: dict[str, int] = {}
-    for r in records:
-        key = f"{r['group']}/{r['split']}"
-        counts[key] = counts.get(key, 0) + 1
-    header["source_counts"] = counts
-    (session / "manifest.json").write_text(json.dumps(header, indent=2, ensure_ascii=False))
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps(header, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    with (manifest_dir / "manifest.jsonl").open("w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    by_profile = {
+        profile: summarize(
+            [r["stats"] for r in records if r["profile"] == profile]  # type: ignore[index]
+        )
+        for profile in profiles
+    }
+    by_split = {
+        split: summarize(
+            [r["stats"] for r in records if r["split"] == split]  # type: ignore[index]
+        )
+        for split in counts
+    }
+    summary = {
+        "version": args.version,
+        "fingerprint": header["fingerprint"],
+        "generated": len(records),
+        "overall": summarize([r["stats"] for r in records]),  # type: ignore[index]
+        "by_profile": by_profile,
+        "by_split": by_split,
+        "counts": counts,
+        "errors": errors,
+    }
+    (manifest_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Generate stratified ESP32-style LR images for human review.",
+        description="Generate pre-computed ESP32 LR images for paired training.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--data-root", type=Path, default=Path("data"))
-    p.add_argument(
-        "--review-root",
-        type=Path,
-        default=Path("data/esp32_degrade_review"),
-        help="root directory for review sessions",
-    )
-    p.add_argument("--session", type=str, default=None, help="session folder name")
-    p.add_argument("--version", default=DEFAULT_VERSION, help="frozen degrader version")
-    p.add_argument("--scale", type=int, default=4)
+    p.add_argument("--scale", type=int, default=4, choices=[2, 3, 4, 8])
+    p.add_argument("--version", default=DEFAULT_VERSION, choices=list(list_versions()))
     p.add_argument("--severity", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
-        "--per-profile",
-        type=int,
-        default=2,
-        help="number of images per profile per dataset group",
+        "--splits",
+        type=str,
+        default="div2k_train,div2k_valid,flickr2k",
+        help="comma-separated: div2k_train, div2k_valid, flickr2k",
     )
     p.add_argument(
         "--profiles",
         type=str,
         default="",
-        help="comma-separated subset of profiles (default: all)",
+        help="comma-separated profile subset (default: all)",
     )
     p.add_argument(
-        "--datasets",
-        type=str,
-        default="div2k,flickr2k",
-        help="comma-separated groups: div2k, flickr2k",
+        "--profile-mode",
+        choices=["auto", "weighted", "cycle"],
+        default="auto",
+        help="auto = weighted for training splits, cycle for DIV2K valid",
     )
     p.add_argument(
-        "--reference-dir",
-        type=Path,
-        default=Path("data/esp32_camera/data01"),
-        help="real ESP32 images used for a comparison contact sheet",
+        "--output-format",
+        choices=["png", "jpg"],
+        default="png",
+        help="PNG keeps the baked-in JPEG artifacts without another lossy encode",
     )
-    p.add_argument("--preview-count", type=int, default=36)
+    p.add_argument("--max-items", type=int, default=0, help="debug: cap each split")
+    p.add_argument("--workers", type=int, default=4, help="parallel worker processes")
     p.add_argument("--overwrite", action="store_true")
-    p.add_argument("--list-profiles", action="store_true")
+    p.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=Path("data/esp32_degrade_dataset"),
+        help="dataset manifest / summary output directory",
+    )
+    p.add_argument("--no-manifest", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
     p.add_argument("--list-versions", action="store_true")
+    p.add_argument("--list-profiles", action="store_true")
     return p.parse_args(argv)
 
 
@@ -302,134 +341,75 @@ def main(argv: list[str] | None = None) -> None:
         print("\n".join(list_versions()))
         return
     if args.list_profiles:
-        for name in profile_names(args.version):
-            print(name)
+        print("\n".join(profile_names(args.version)))
         return
 
-    version_module = get_version(args.version)
+    version = get_version(args.version)
+    available = list(version.profile_names())
     requested = [x.strip() for x in args.profiles.split(",") if x.strip()]
-    profiles = list(version_module.profile_names())
     if requested:
-        missing = [x for x in requested if x not in profiles]
+        missing = [x for x in requested if x not in available]
         if missing:
-            raise SystemExit(f"unknown profiles: {missing}; available: {profiles}")
+            raise SystemExit(f"unknown profiles: {missing}; available: {available}")
         profiles = requested
-
-    datasets = [x.strip() for x in args.datasets.split(",") if x.strip()]
-    unknown = [x for x in datasets if x not in {"div2k", "flickr2k"}]
-    if unknown:
-        raise SystemExit(f"unknown datasets: {unknown}")
+    else:
+        profiles = available
+    weights = profile_weights(args.version)
 
     data_root = _resolve_project_path(args.data_root)
-    review_root = _resolve_project_path(args.review_root)
-    reference_dir = _resolve_project_path(args.reference_dir)
+    manifest_dir = _resolve_project_path(args.manifest_dir)
 
-    pools = _collect_pools(data_root, datasets)
-    if not pools:
-        raise SystemExit(f"no HR files found under {data_root}")
+    tasks, counts = _build_tasks(args, data_root, profiles, weights)
+    total = sum(c["total"] for c in counts.values())
+    queued = sum(c["queued"] for c in counts.values())
+    skipped = sum(c["skipped"] for c in counts.values())
+    print(f"version: {args.version} | fingerprint: {fingerprint(args.version)}")
+    for split, c in counts.items():
+        out_dir = data_root / SPLITS[split]["lr"] / f"X{args.scale}"
+        print(
+            f"  {split:14s} total={c['total']:5d} queued={c['queued']:5d} "
+            f"skipped={c['skipped']:5d} -> {_relative(out_dir)}"
+        )
+    print(f"total={total} queued={queued} skipped={skipped}")
 
-    rng = random.Random(args.seed)
-    records = _pick_records(pools, profiles, args.per_profile, rng)
+    if args.dry_run or not tasks:
+        if skipped and not args.overwrite:
+            print("existing files were skipped; use --overwrite to regenerate them")
+        return
 
-    session = _new_session_dir(
-        review_root, args.session, overwrite=args.overwrite, prefix=args.version
-    )
-    session.mkdir(parents=True, exist_ok=False)
-    images_dir = session / "images"
-    preview_dir = session / "previews"
-    images_dir.mkdir(parents=True, exist_ok=True)
-    preview_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, object]] = []
+    errors: list[dict[str, object]] = []
+    workers = max(1, int(args.workers))
+    if workers == 1:
+        for task in tqdm(tasks, desc="esp32-lr", unit="img"):
+            result = _process_one(task)
+            if result["ok"]:
+                records.append(result["record"])  # type: ignore[arg-type]
+            else:
+                errors.append(result)
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_process_one, task): task for task in tasks}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="esp32-lr", unit="img"):
+                result = future.result()
+                if result["ok"]:
+                    records.append(result["record"])  # type: ignore[arg-type]
+                else:
+                    errors.append(result)
 
-    # Write the header before generation so a partially finished session is
-    # still inspectable.
-    _write_manifest_header(session, args, profiles, records)
+    records.sort(key=lambda r: str(r["lr"]))
+    if not args.no_manifest:
+        _write_manifest(manifest_dir, args, profiles, records, counts, errors)
+        print(f"manifest: {_relative(manifest_dir / 'manifest.jsonl')}")
+        print(f"summary:  {_relative(manifest_dir / 'summary.json')}")
 
-    print(
-        f"session: {session}\n"
-        f"version: {args.version} | scale: {args.scale} | profiles: {len(profiles)} | "
-        f"records: {len(records)}"
-    )
-
-    manifest_rows: list[dict[str, object]] = []
-    stats_rows: list[dict[str, float | int]] = []
-    preview_items: list[tuple[Path, str]] = []
-
-    with (session / "manifest.jsonl").open("w", encoding="utf-8") as manifest:
-        for record in tqdm(records, desc="degrade", unit="img"):
-            source_path = Path(str(record["path"]))
-            with Image.open(source_path) as im:
-                hr = im.convert("RGB")
-            hr_size = hr.size
-            lr, spec = degrade_image(
-                hr,
-                version=args.version,
-                seed=int(record["seed"]),
-                profile=str(record["profile"]),
-                scale=args.scale,
-                severity=args.severity,
-            )
-            out_dir = images_dir / str(record["group"]) / str(record["split"])
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / _output_name(record)
-            lr.save(out_path, format="PNG", optimize=True)
-
-            stats = image_stats(lr)
-            stats_rows.append(stats)
-            row = {
-                "id": (
-                    f"{record['group']}_{record['split']}_{source_path.stem}_"
-                    f"{record['profile']}_{record['seed']}"
-                ),
-                "source_group": record["group"],
-                "split": record["split"],
-                "source": _relative(source_path),
-                "hr_size": list(hr_size),
-                "lr_size": list(lr.size),
-                "lr": out_path.relative_to(session).as_posix(),
-                "profile": record["profile"],
-                "version": args.version,
-                "scale": args.scale,
-                "severity": args.severity,
-                "seed": int(record["seed"]),
-                "spec": spec,
-                "stats": stats,
-            }
-            manifest_rows.append(row)
-            manifest.write(json.dumps(row, ensure_ascii=False) + "\n")
-            label = f"{record['group']}/{record['split']} {source_path.stem} | {record['profile']}"
-            preview_items.append((out_path, label))
-
-    summary = {
-        "session": session.name,
-        "version": args.version,
-        "fingerprint": fingerprint(args.version),
-        "count": len(manifest_rows),
-        "overall": summarize(stats_rows),
-        "by_profile": {
-            profile: summarize([s for s, r in zip(stats_rows, manifest_rows) if r["profile"] == profile])
-            for profile in profiles
-        },
-    }
-    reference = _compute_reference_stats(reference_dir)
-    summary["reference"] = reference
-    (session / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
-
-    # Regenerate the header with the final counts.
-    _write_manifest_header(session, args, profiles, records)
-
-    _make_contact_sheet(preview_items[: args.preview_count], preview_dir / "contact_sheet.jpg")
-    ref_files = _reference_files(reference_dir)
-    if ref_files:
-        random.Random(args.seed + 1).shuffle(ref_files)
-        ref_items = [(p, "ESP32 data01 reference") for p in ref_files[: min(18, len(ref_files))]]
-        _make_contact_sheet(ref_items, preview_dir / "reference_sheet.jpg")
-
-    print(f"\nwrote {len(manifest_rows)} review images")
-    print(f"manifest: {session / 'manifest.jsonl'}")
-    print(f"summary:  {session / 'summary.json'}")
-    print(f"preview:  {preview_dir / 'contact_sheet.jpg'}")
-    if reference:
-        print(f"reference stats: {reference['dir']} ({reference['count']} images)")
+    print(f"generated {len(records)} images, {len(errors)} errors")
+    if errors:
+        for err in errors[:10]:
+            print(f"  failed: {err.get('source')}: {err.get('error')}", file=sys.stderr)
+        if len(errors) > 10:
+            print(f"  ... and {len(errors) - 10} more", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
