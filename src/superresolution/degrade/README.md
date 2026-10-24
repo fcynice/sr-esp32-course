@@ -122,6 +122,16 @@ python -m superresolution.train \
   --patch-size 192 --batch-size 16 --epochs 150
 ```
 
+可以用已有 run 初始化模型权重，同时让 optimizer / scheduler 从头开始：
+
+```bash
+python -m superresolution.train \
+  --model edsr --lr-type esp32 \
+  --init-from runs/res05/best.pth \
+  --lr 1e-4 --epochs 80 \
+  --patch-size 192 --batch-size 16
+```
+
 训练时：
 
 - 从 `DIV2K_train_LR_esp32/X4` / `Flickr2K_LR_esp32/X4` 读取预生成 LR

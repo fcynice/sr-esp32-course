@@ -238,6 +238,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-train-items", type=int, default=0, help="debug: cap train set")
     p.add_argument("--max-val-items", type=int, default=0, help="debug: cap val set")
     p.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help=(
+            "initialize model weights from a checkpoint or run directory "
+            "(e.g. runs/res05/best.pth); optimizer/scheduler/epoch are not loaded"
+        ),
+    )
+    p.add_argument(
         "--resume",
         type=str,
         default=None,
@@ -260,12 +269,45 @@ def resolve_resume(path_str: str, output_dir: str | Path) -> tuple[Path, Path]:
     return p.parent, p
 
 
+def resolve_init_checkpoint(path_str: str, output_dir: str | Path) -> Path:
+    """Resolve ``--init-from`` to a checkpoint file.
+
+    A run directory is accepted and resolves to ``best.pth`` first, then
+    ``last.pth``.  Only model weights are loaded from this checkpoint.
+    """
+    p = Path(path_str)
+    if not p.exists():
+        alt = Path(output_dir) / path_str
+        if alt.exists():
+            p = alt
+        else:
+            raise FileNotFoundError(f"init checkpoint not found: {path_str}")
+    if p.is_dir():
+        for name in ("best.pth", "last.pth"):
+            candidate = p / name
+            if candidate.is_file():
+                return candidate
+        raise FileNotFoundError(f"no best.pth or last.pth in {p}")
+    if not p.is_file() or p.suffix.lower() != ".pth":
+        raise ValueError(f"init checkpoint must be a .pth file or run directory: {p}")
+    return p
+
+
 def main(argv=None) -> None:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parsed = parse_args(raw_argv)
 
+    if parsed.resume and parsed.init_from:
+        raise SystemExit("--resume and --init-from cannot be used together")
+
     resume_ckpt = None
+    init_ckpt = None
+    init_path: Path | None = None
     run_dir: Path | None = None
+    if parsed.init_from:
+        init_path = resolve_init_checkpoint(parsed.init_from, parsed.output_dir)
+        init_ckpt = torch.load(init_path, map_location="cpu", weights_only=False)
+
     if parsed.resume:
         run_dir, ckpt_path = resolve_resume(parsed.resume, parsed.output_dir)
         if not ckpt_path.exists():
@@ -349,7 +391,28 @@ def main(argv=None) -> None:
     }
 
     arch_kwargs = model_kwargs_for(args.model, args)
-    model = build_model(args.model, **arch_kwargs).to(device)
+    model = build_model(args.model, **arch_kwargs)
+    if init_ckpt is not None:
+        ckpt_model_name = init_ckpt.get("model_name", "espcn")
+        if ckpt_model_name != args.model:
+            raise ValueError(
+                f"init checkpoint model is {ckpt_model_name!r}, but --model is "
+                f"{args.model!r}; use a matching model or change --model"
+            )
+        state_dict = init_ckpt.get("model", init_ckpt)
+        if not isinstance(state_dict, dict):
+            raise ValueError(f"init checkpoint has no model state dict: {init_path}")
+        state_dict = {
+            (k[7:] if k.startswith("module.") else k): v for k, v in state_dict.items()
+        }
+        model.load_state_dict(state_dict, strict=True)
+        print(
+            f"init model from {init_path} "
+            f"(epoch={init_ckpt.get('epoch', '?')}, "
+            f"psnr={init_ckpt.get('psnr', '?')}); "
+            "optimizer/scheduler/epoch are fresh"
+        )
+    model = model.to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model: {args.model} {arch_kwargs}")
     print(f"model params: {n_params:,}")
@@ -376,6 +439,13 @@ def main(argv=None) -> None:
                     "scale": args.scale,
                     "model": args.model,
                     "model_kwargs": arch_kwargs,
+                    "init_from": str(init_path) if init_path is not None else None,
+                    "init_epoch": (
+                        init_ckpt.get("epoch") if init_ckpt is not None else None
+                    ),
+                    "init_psnr": (
+                        init_ckpt.get("psnr") if init_ckpt is not None else None
+                    ),
                 },
                 indent=2,
             )

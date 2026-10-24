@@ -164,6 +164,7 @@ train-sr --model edsr --epochs 150
 | `--no-augment` | — | 关闭翻转/旋转增强 |
 | `--no-amp` | — | 关闭混合精度 |
 | `--seed` | `42` | 随机种子（数据划分 / 增强 / LR 采样） |
+| `--init-from` | — | 从 checkpoint / run 目录只加载模型权重（不加载 optimizer/scheduler/epoch） |
 | `--resume` | — | 从 run 目录或 checkpoint 续训（见「断点续训」） |
 
 > `--max-train-items` / `--max-val-items` 是调试参数：前者限制训练的 **HR 图片数**（`both` 时实际样本为 2 倍），后者限制展平后的验证样本数。
@@ -213,6 +214,24 @@ checkpoint（`best.pth` / `last.pth`）是**自描述**的，内部保存了 `mo
 - 学习率会按余弦调度接续到当前 epoch，不会跳回初始值。
 - 若在 epoch 中途 `Ctrl+C`，会以当前 epoch 保存；续训从下一 epoch 开始，该 epoch 剩余的 batch 会被跳过（随机采样下影响可忽略）。
 - 新 checkpoint 会恢复 optimizer / scaler 状态；旧 checkpoint（如 res04）没有 optimizer 状态，续训会重新初始化 Adam（会打印 warning），但 LR 仍正确衔接。
+
+## 从已有 run 初始化
+
+`--init-from` 只加载模型权重，不加载 optimizer / scheduler / epoch，适合用已有
+run 做迁移学习或切换到新的 LR 类型：
+
+```bash
+.venv/bin/python -m superresolution.train \
+  --model edsr --lr-type esp32 \
+  --init-from runs/res05/best.pth \
+  --lr 1e-4 --epochs 80 \
+  --patch-size 192 --batch-size 16
+```
+
+- 可以给 checkpoint 文件，也可以给 run 目录；目录优先 `best.pth`，没有则用 `last.pth`
+- checkpoint 的模型结构必须与当前 `--model` / `--channels` / `--n-blocks` 匹配
+- `--resume` 与 `--init-from` 互斥
+- 新 run 从 epoch 1 开始，`run_info.json` 会记录 `init_from` / `init_epoch` / `init_psnr`
 
 ## 推理
 
