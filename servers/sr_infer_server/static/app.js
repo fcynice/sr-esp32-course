@@ -465,7 +465,10 @@ function renderSelected() {
 
   const bits = [info.name, `${info.width}×${info.height}`];
   if (info.dataset) {
-    bits.push(`已匹配 ${info.dataset.dataset} HR（x${info.dataset.lr_scale}）`);
+    const source = info.dataset.lr_type
+      ? `${info.dataset.lr_type} · x${info.dataset.lr_scale}`
+      : `x${info.dataset.lr_scale}`;
+    bits.push(`已匹配 ${info.dataset.dataset} HR（${source}）`);
   }
   el.selectedMeta.textContent = bits.join(" · ");
   updateInferButton();
@@ -530,9 +533,11 @@ function finishSuccess(result) {
     if (!state.busy) hideProgress();
   }, 900);
 
+  const lrSource =
+    result.dataset && result.dataset.lr_type ? result.dataset.lr_type : "";
   state.images.lr = {
     role: "lr",
-    label: "LR 推理输入",
+    label: lrSource ? `LR 推理输入（${lrSource}）` : "LR 推理输入",
     path: result.lr_path,
     url: imageUrl(result.lr_path),
     thumb_url: imageUrl(result.lr_path, "thumb"),
@@ -773,6 +778,12 @@ function updateResultInfo() {
     "模型",
     `${String(result.model || "").toUpperCase()} · x${result.scale} · ${result.run}/${result.checkpoint}.pth`
   );
+  if (result.dataset) {
+    appendBit(
+      "LR 来源",
+      `${result.dataset.dataset} · ${result.dataset.lr_type || "?"} · x${result.dataset.lr_scale}`
+    );
+  }
   appendBit("用时", `${Number(result.elapsed_seconds || 0).toFixed(2)} s`);
 
   if (result.metrics) {

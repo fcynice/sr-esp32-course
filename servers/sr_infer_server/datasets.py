@@ -23,6 +23,7 @@ class DatasetMapping:
     label: str
     lr_root: str  # relative to project root
     hr_root: str  # relative to project root
+    lr_type: str = ""  # bicubic / unknown / esp32
 
 
 DATASET_MAPPINGS: tuple[DatasetMapping, ...] = (
@@ -30,31 +31,55 @@ DATASET_MAPPINGS: tuple[DatasetMapping, ...] = (
         label="DIV2K 训练集",
         lr_root="data/DIV2K/DIV2K_train_LR_bicubic",
         hr_root="data/DIV2K/DIV2K_train_HR",
+        lr_type="bicubic",
     ),
     DatasetMapping(
         label="DIV2K 训练集",
         lr_root="data/DIV2K/DIV2K_train_LR_unknown",
         hr_root="data/DIV2K/DIV2K_train_HR",
+        lr_type="unknown",
+    ),
+    DatasetMapping(
+        label="DIV2K 训练集",
+        lr_root="data/DIV2K/DIV2K_train_LR_esp32",
+        hr_root="data/DIV2K/DIV2K_train_HR",
+        lr_type="esp32",
     ),
     DatasetMapping(
         label="DIV2K 验证集",
         lr_root="data/DIV2K/DIV2K_valid_LR_bicubic",
         hr_root="data/DIV2K/DIV2K_valid_HR",
+        lr_type="bicubic",
     ),
     DatasetMapping(
         label="DIV2K 验证集",
         lr_root="data/DIV2K/DIV2K_valid_LR_unknown",
         hr_root="data/DIV2K/DIV2K_valid_HR",
+        lr_type="unknown",
+    ),
+    DatasetMapping(
+        label="DIV2K 验证集",
+        lr_root="data/DIV2K/DIV2K_valid_LR_esp32",
+        hr_root="data/DIV2K/DIV2K_valid_HR",
+        lr_type="esp32",
     ),
     DatasetMapping(
         label="Flickr2K",
         lr_root="data/Flickr2K/Flickr2K_LR_bicubic",
         hr_root="data/Flickr2K/Flickr2K_HR",
+        lr_type="bicubic",
     ),
     DatasetMapping(
         label="Flickr2K",
         lr_root="data/Flickr2K/Flickr2K_LR_unknown",
         hr_root="data/Flickr2K/Flickr2K_HR",
+        lr_type="unknown",
+    ),
+    DatasetMapping(
+        label="Flickr2K",
+        lr_root="data/Flickr2K/Flickr2K_LR_esp32",
+        hr_root="data/Flickr2K/Flickr2K_HR",
+        lr_type="esp32",
     ),
 )
 
@@ -115,6 +140,7 @@ def find_hr_for_lr(settings: Settings, lr_path: Path) -> dict[str, object] | Non
 
         return {
             "dataset": mapping.label,
+            "lr_type": mapping.lr_type,
             "lr_scale": scale,
             "lr_dir": _display(settings, lr_resolved.parent),
             "hr_path": _display(settings, hr_path),

@@ -18,8 +18,9 @@
   - 拖动线模式：两图叠放，用一条可拖动、可调角度的细线分割；线一侧是推理前，
     另一侧是推理后；可拖动线本身或中间的圆点移动位置。
   - 滚轮缩放、拖动画布平移；左右两栏同步。
-- HR 配对：如果选中的 LR 位于 DIV2K / Flickr2K 的已知 LR 目录，自动找到对应 HR，
-  此时有 LR、HR、SR 三张图，可切换 `LR / SR`、`SR / HR`、`LR / HR` 对比。
+- HR 配对：如果选中的 LR 位于 DIV2K / Flickr2K 的已知 LR 目录（`bicubic` / `unknown` /
+  `esp32`），自动找到对应 HR，此时有 LR、HR、SR 三张图，可切换 `LR / SR`、
+  `SR / HR`、`LR / HR` 对比；LR 卡片/标签会显示来源类型（如 `esp32`）。
 - 有 HR 且尺寸一致时，计算并显示 SR vs HR 的 PSNR / SSIM。
 - 推理在后台任务中执行，页面轮询进度；大图自动分块，避免显存不足。
 - SR 结果保存到 `data/sr_infer/results/`，支持下载。
@@ -135,15 +136,19 @@ curl http://127.0.0.1:8001/api/jobs/<job_id>
 |---|---|
 | `data/DIV2K/DIV2K_train_LR_bicubic/X*` | `data/DIV2K/DIV2K_train_HR` |
 | `data/DIV2K/DIV2K_train_LR_unknown/X*` | `data/DIV2K/DIV2K_train_HR` |
+| `data/DIV2K/DIV2K_train_LR_esp32/X*` | `data/DIV2K/DIV2K_train_HR` |
 | `data/DIV2K/DIV2K_valid_LR_bicubic/X*` | `data/DIV2K/DIV2K_valid_HR` |
 | `data/DIV2K/DIV2K_valid_LR_unknown/X*` | `data/DIV2K/DIV2K_valid_HR` |
+| `data/DIV2K/DIV2K_valid_LR_esp32/X*` | `data/DIV2K/DIV2K_valid_HR` |
 | `data/Flickr2K/Flickr2K_LR_bicubic/X*` | `data/Flickr2K/Flickr2K_HR` |
 | `data/Flickr2K/Flickr2K_LR_unknown/X*` | `data/Flickr2K/Flickr2K_HR` |
+| `data/Flickr2K/Flickr2K_LR_esp32/X*` | `data/Flickr2K/Flickr2K_HR` |
 
 文件名去掉 LR 末尾的 `xN` 后去 HR 目录找同名文件：
 
 - DIV2K：`0075x4.png` -> `0075.jpeg`
 - Flickr2K：`000969x4.png` -> `000969.png`
+- ESP32：`0801x4.png` -> `0801.jpeg`（与 bicubic/unknown 使用同一份 HR）
 
 其他目录（`data/大学教室`、`data/esp32_camera` 等）没有 HR，页面只显示 LR / SR。
 后续新增数据集时，在 `datasets.py` 的 `DATASET_MAPPINGS` 里加一行即可。
