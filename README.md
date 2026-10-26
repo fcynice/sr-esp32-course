@@ -85,10 +85,11 @@ bash scripts/download_div2k_lr.sh    # 下载 DIV2K 的 LR 归档 (bicubic + unk
 > 验证默认覆盖训练所用的全部 LR 类型（`both` 时同时报告 bicubic / unknown 的 PSNR），
 > 控制台会显示分项：`val_psnr=... (bicubic=..., unknown=...)`。
 >
-> 新增 `--lr-type esp32`：先用 `python -m superresolution.degrade` 把退化 LR 生成到
-> `DIV2K_train_LR_esp32/X4` 等目录，再像 `bicubic` / `unknown` 一样走原有对齐裁剪训练。
-> 数据划分仍为 DIV2K train + Flickr2K 95% 训练、DIV2K valid + Flickr2K 5% 验证。
-> 详见 [degrade/README.md](src/superresolution/degrade/README.md)。
+> 新增 `--lr-type esp32_v1` / `esp32_v2`：先用 `python -m superresolution.degrade`
+> 生成带版本和 variant 的 LR（如 `DIV2K_train_LR_esp32_v2/X4/v0`），再像
+> `bicubic` / `unknown` 一样走原有对齐裁剪训练。数据划分仍为 DIV2K train +
+> Flickr2K 95% 训练、DIV2K valid + Flickr2K 5% 验证。详见
+> [degrade/README.md](src/superresolution/degrade/README.md)。
 
 ### bicubic vs unknown（实测参考）
 
@@ -151,7 +152,7 @@ train-sr --model edsr --epochs 150
 | `--output-dir` | `runs` | 输出目录 |
 | `--model` | `edsr` | `espcn` 或 `edsr` |
 | `--scale` | `4` | 放大倍数（2/3/4/8） |
-| `--lr-type` | `both` | `bicubic` / `unknown` / `both` / `esp32`（读取预生成 ESP32 LR） |
+| `--lr-type` | `both` | `bicubic` / `unknown` / `both` / `esp32_v1` / `esp32_v2`（读取对应版本的预生成 LR） |
 | `--patch-size` | `192` | HR 训练块大小（须能被 scale 整除，X4 对应 LR 48×48） |
 | `--batch-size` | `16` | 批大小 |
 | `--epochs` | `100` | 训练轮数 |
@@ -222,7 +223,7 @@ run 做迁移学习或切换到新的 LR 类型：
 
 ```bash
 .venv/bin/python -m superresolution.train \
-  --model edsr --lr-type esp32 \
+  --model edsr --lr-type esp32_v2 \
   --init-from runs/res05/best.pth \
   --lr 1e-4 --epochs 80 \
   --patch-size 192 --batch-size 16
@@ -268,18 +269,19 @@ run 做迁移学习或切换到新的 LR 类型：
 - **生成 ESP32 LR 数据集**：
 
   ```bash
-  python -m superresolution.degrade --version v1 --scale 4
+  python -m superresolution.degrade --version v2 --variants 2 --scale 4
   ```
 
-  输出到 `data/DIV2K/DIV2K_train_LR_esp32/X4`、`DIV2K_valid_LR_esp32/X4`、
-  `data/Flickr2K/Flickr2K_LR_esp32/X4`。支持 `--profiles`、`--severity`、
-  `--splits`、`--output-format`、`--workers`、`--dry-run` 等参数。详见
+  输出到 `data/DIV2K/DIV2K_train_LR_esp32_v2/X4/v0`、`.../X4/v1`，
+  `DIV2K_valid_LR_esp32_v2/X4` 和 `data/Flickr2K/Flickr2K_LR_esp32_v2/X4`。
+  支持 `--variants`、`--profiles`、`--severity`、`--splits`、`--output-format`、
+  `--workers`、`--dry-run` 等参数。详见
   [src/superresolution/degrade/README.md](src/superresolution/degrade/README.md)。
-- **ESP32 LR 训练**：生成后使用 `--lr-type esp32`，走原有对齐裁剪流程：
+- **ESP32 LR 训练**：生成后使用对应版本类型，例如 `--lr-type esp32_v2`：
 
   ```bash
-  python -m superresolution.train --model edsr --lr-type esp32 \
-    --patch-size 192 --batch-size 16 --epochs 150
+  python -m superresolution.train --model edsr --lr-type esp32_v2 \
+    --patch-size 192 --batch-size 16 --epochs 80
   ```
 - **退化审查可视化**：`python -m servers.degrade_review_server --port 8002`，
   文档见 [servers/degrade_review_server/README.md](servers/degrade_review_server/README.md)。

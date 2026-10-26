@@ -1,17 +1,18 @@
 """Generate pre-computed ESP32 LR datasets for paired training.
 
-The output follows the existing data layout, so ``train.py --lr-type esp32``
+The output is versioned and variant-aware, so ``train.py --lr-type esp32_v2``
 uses the normal aligned HR/LR pipeline::
 
-    data/DIV2K/DIV2K_train_LR_esp32/X4/0001x4.png
-    data/DIV2K/DIV2K_valid_LR_esp32/X4/0801x4.png
-    data/Flickr2K/Flickr2K_LR_esp32/X4/000001x4.png
+    data/DIV2K/DIV2K_train_LR_esp32_v2/X4/v0/0001x4.png
+    data/DIV2K/DIV2K_train_LR_esp32_v2/X4/v1/0001x4.png
+    data/DIV2K/DIV2K_valid_LR_esp32_v2/X4/v0/0801x4.png
+    data/Flickr2K/Flickr2K_LR_esp32_v2/X4/v0/000001x4.png
 
 Examples
 --------
-Generate all three splits with the frozen v1 model::
+Generate all three splits with the default v2 model and two variants::
 
-    python -m superresolution.degrade --version v1 --scale 4
+    python -m superresolution.degrade --version v2 --variants 2 --scale 4
 
 Generate a small test batch::
 
@@ -55,18 +56,18 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 SPLITS: dict[str, dict[str, str]] = {
     "div2k_train": {
         "hr": "DIV2K/DIV2K_train_HR",
-        "lr": "DIV2K/DIV2K_train_LR_esp32",
+        "lr": "DIV2K/DIV2K_train_LR_esp32_{version}",
         "profile_mode": "weighted",
     },
     "div2k_valid": {
         "hr": "DIV2K/DIV2K_valid_HR",
-        "lr": "DIV2K/DIV2K_valid_LR_esp32",
+        "lr": "DIV2K/DIV2K_valid_LR_esp32_{version}",
         "profile_mode": "cycle",
     },
     "flickr2k": {
         # All 2650 HR images.  train.py keeps its existing 95/5 HR-level split.
         "hr": "Flickr2K/Flickr2K_HR",
-        "lr": "Flickr2K/Flickr2K_LR_esp32",
+        "lr": "Flickr2K/Flickr2K_LR_esp32_{version}",
         "profile_mode": "weighted",
     },
 }
@@ -79,6 +80,7 @@ class Task:
     source_rel: str
     target_rel: str
     split: str
+    variant: int
     profile: str
     seed: int
     version: str
@@ -111,9 +113,10 @@ def collect_hr_files(hr_dir: Path) -> list[Path]:
     ]
 
 
-def _seed_for(base_seed: int, source_rel: str) -> int:
+def _seed_for(base_seed: int, source_rel: str, variant: int = 0) -> int:
     # Stable across runs and independent of worker scheduling.
-    return (int(base_seed) * 1_000_003 + zlib.crc32(source_rel.encode("utf-8"))) & 0x7FFFFFFF
+    base = int(base_seed) + int(variant) * 7_919
+    return (base * 1_000_003 + zlib.crc32(source_rel.encode("utf-8"))) & 0x7FFFFFFF
 
 
 def _sample_profile(
@@ -149,6 +152,7 @@ def _process_one(task: Task) -> dict[str, object]:
         stats = image_stats(lr)
         record = {
             "split": task.split,
+            "variant": task.variant,
             "source": task.source_rel,
             "lr": task.target_rel,
             "profile": task.profile,
@@ -175,16 +179,19 @@ def _build_tasks(
     if unknown:
         raise SystemExit(f"unknown splits: {unknown}; available: {list(SPLITS)}")
 
+    variants = max(1, int(args.variants))
     tasks: list[Task] = []
     counts: dict[str, dict[str, int]] = {}
     for split in splits:
         meta = SPLITS[split]
         hr_dir = data_root / meta["hr"]
-        lr_dir = data_root / meta["lr"] / f"X{args.scale}"
+        lr_dir = (
+            data_root / meta["lr"].format(version=args.version) / f"X{args.scale}"
+        )
         files = collect_hr_files(hr_dir)
         if not files:
             print(f"warning: no HR files in {hr_dir}", file=sys.stderr)
-            counts[split] = {"total": 0, "queued": 0, "skipped": 0}
+            counts[split] = {"total": 0, "queued": 0, "skipped": 0, "files": 0}
             continue
         if args.max_items > 0:
             files = files[: args.max_items]
@@ -194,33 +201,47 @@ def _build_tasks(
         skipped = 0
         for index, source in enumerate(files):
             source_rel = _relative(source)
-            seed = _seed_for(args.seed, source_rel)
-            if mode == "cycle":
-                profile = profiles[index % len(profiles)]
-            else:
-                profile = _sample_profile(np.random.default_rng(seed), profiles, weights)
+            for variant in range(variants):
+                seed = _seed_for(args.seed, source_rel, variant)
+                if mode == "cycle":
+                    slot = index * variants + variant
+                    profile = profiles[slot % len(profiles)]
+                else:
+                    profile = _sample_profile(
+                        np.random.default_rng(seed), profiles, weights
+                    )
 
-            target = lr_dir / f"{source.stem}x{args.scale}.{args.output_format}"
-            if target.exists() and not args.overwrite:
-                skipped += 1
-                continue
-            tasks.append(
-                Task(
-                    source=source,
-                    target=target,
-                    source_rel=source_rel,
-                    target_rel=_relative(target),
-                    split=split,
-                    profile=profile,
-                    seed=seed,
-                    version=args.version,
-                    scale=args.scale,
-                    severity=args.severity,
-                    output_format=args.output_format,
+                target = (
+                    lr_dir
+                    / f"v{variant}"
+                    / f"{source.stem}x{args.scale}.{args.output_format}"
                 )
-            )
-            queued += 1
-        counts[split] = {"total": len(files), "queued": queued, "skipped": skipped}
+                if target.exists() and not args.overwrite:
+                    skipped += 1
+                    continue
+                tasks.append(
+                    Task(
+                        source=source,
+                        target=target,
+                        source_rel=source_rel,
+                        target_rel=_relative(target),
+                        split=split,
+                        variant=variant,
+                        profile=profile,
+                        seed=seed,
+                        version=args.version,
+                        scale=args.scale,
+                        severity=args.severity,
+                        output_format=args.output_format,
+                    )
+                )
+                queued += 1
+        counts[split] = {
+            "total": len(files) * variants,
+            "files": len(files),
+            "queued": queued,
+            "skipped": skipped,
+        }
     return tasks, counts
 
 
@@ -243,11 +264,18 @@ def _write_manifest(
         "profiles": profiles,
         "profile_mode": args.profile_mode,
         "output_format": args.output_format,
+        "variants": max(1, int(args.variants)),
         "counts": counts,
         "generated": len(records),
         "errors": len(errors),
         "outputs": {
-            split: f"{meta['lr']}/X{args.scale}" for split, meta in SPLITS.items()
+            split: {
+                "root": f"{meta['lr'].format(version=args.version)}/X{args.scale}",
+                "variants": [
+                    f"v{i}" for i in range(max(1, int(args.variants)))
+                ],
+            }
+            for split, meta in SPLITS.items()
         },
     }
     (manifest_dir / "manifest.json").write_text(
@@ -319,6 +347,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="PNG keeps the baked-in JPEG artifacts without another lossy encode",
     )
     p.add_argument("--max-items", type=int, default=0, help="debug: cap each split")
+    p.add_argument(
+        "--variants",
+        type=int,
+        default=2,
+        help="number of independent LR variants per HR (written to v0/, v1/, ...)",
+    )
     p.add_argument("--workers", type=int, default=4, help="parallel worker processes")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument(
@@ -357,18 +391,27 @@ def main(argv: list[str] | None = None) -> None:
     weights = profile_weights(args.version)
 
     data_root = _resolve_project_path(args.data_root)
-    manifest_dir = _resolve_project_path(args.manifest_dir)
+    manifest_dir = _resolve_project_path(args.manifest_dir) / args.version
 
     tasks, counts = _build_tasks(args, data_root, profiles, weights)
     total = sum(c["total"] for c in counts.values())
     queued = sum(c["queued"] for c in counts.values())
     skipped = sum(c["skipped"] for c in counts.values())
-    print(f"version: {args.version} | fingerprint: {fingerprint(args.version)}")
+    variants = max(1, int(args.variants))
+    print(
+        f"version: {args.version} | variants: {variants} | "
+        f"fingerprint: {fingerprint(args.version)}"
+    )
     for split, c in counts.items():
-        out_dir = data_root / SPLITS[split]["lr"] / f"X{args.scale}"
+        out_dir = (
+            data_root
+            / SPLITS[split]["lr"].format(version=args.version)
+            / f"X{args.scale}"
+        )
         print(
-            f"  {split:14s} total={c['total']:5d} queued={c['queued']:5d} "
-            f"skipped={c['skipped']:5d} -> {_relative(out_dir)}"
+            f"  {split:14s} files={c.get('files', 0):5d} total={c['total']:5d} "
+            f"queued={c['queued']:5d} skipped={c['skipped']:5d} -> "
+            f"{_relative(out_dir)}/v0..v{variants - 1}"
         )
     print(f"total={total} queued={queued} skipped={skipped}")
 

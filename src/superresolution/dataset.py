@@ -16,6 +16,7 @@ sub-pixel (PixelShuffle) model.
 from __future__ import annotations
 
 import random
+import re
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -26,13 +27,24 @@ from torch.utils.data import Dataset
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
 
+def _find_lr_files(lr_dir: Path, stem: str, scale: int) -> list[Path]:
+    """Find flat LR files and variant subdirectories (``v0``, ``v1``, ...)."""
+    pattern = f"{stem}x{scale}.*"
+    matches = list(lr_dir.glob(pattern))
+    if lr_dir.is_dir():
+        for child in sorted(lr_dir.iterdir()):
+            if child.is_dir() and re.fullmatch(r"v\d+", child.name.lower()):
+                matches.extend(child.glob(pattern))
+    return sorted(set(matches))
+
+
 def collect_pairs(
     hr_dir: str | Path,
     lr_dir: str | Path,
     scale: int,
     exts: Iterable[str] = IMG_EXTS,
 ) -> list[tuple[Path, Path]]:
-    """Match HR files in ``hr_dir`` with ``<stem>x{scale}.png`` in ``lr_dir``."""
+    """Match HR files with the first available LR variant."""
     hr_dir = Path(hr_dir)
     lr_dir = Path(lr_dir)
     exts = {e.lower() for e in exts}
@@ -41,14 +53,9 @@ def collect_pairs(
     for hr in sorted(hr_dir.iterdir()):
         if not hr.is_file() or hr.suffix.lower() not in exts:
             continue
-        candidate = lr_dir / f"{hr.stem}x{scale}.png"
-        if not candidate.exists():
-            # Fall back to any extension.
-            matches = list(lr_dir.glob(f"{hr.stem}x{scale}.*"))
-            if not matches:
-                continue
-            candidate = matches[0]
-        pairs.append((hr, candidate))
+        matches = _find_lr_files(lr_dir, hr.stem, scale)
+        if matches:
+            pairs.append((hr, matches[0]))
     return pairs
 
 
@@ -57,15 +64,16 @@ def _load_rgb(path: Path) -> Image.Image:
 
 
 def lr_type_of(path: str | Path) -> str:
-    """Infer the LR variant (``bicubic`` / ``unknown`` / ``esp32``) from a path."""
+    """Infer the LR type (``bicubic`` / ``unknown`` / ``esp32_vN``) from a path."""
     for parent in Path(path).parents:
         name = parent.name.lower()
         if "bicubic" in name:
             return "bicubic"
         if "unknown" in name:
             return "unknown"
-        if "esp32" in name:
-            return "esp32"
+        match = re.search(r"esp32(?:_v\d+)?", name)
+        if match:
+            return match.group(0)
     return ""
 
 
@@ -74,30 +82,27 @@ def collect_hr_items(
     lr_dirs: dict[str, str | Path],
     scale: int,
     exts: Iterable[str] = IMG_EXTS,
-) -> list[tuple[Path, dict[str, Path]]]:
-    """Group each HR file with all of its available LR variants.
+) -> list[tuple[Path, dict[str, list[Path]]]]:
+    """Group each HR file with all available LR variants per type.
 
-    ``lr_dirs`` maps a LR type (e.g. ``"bicubic"``) to its directory.  Returns
-    ``(hr_path, {lr_type: lr_path})`` entries; HR files without any matching LR
-    are skipped.  A missing variant is simply omitted from the inner dict.
+    ``lr_dirs`` maps an LR type (e.g. ``"esp32_v2"``) to its directory.  Each
+    type may contain flat files or variant subdirectories ``v0/``, ``v1/``, ...
+    Returns ``(hr_path, {lr_type: [lr_path, ...]})``; HR files without any
+    matching LR are skipped.
     """
     hr_dir = Path(hr_dir)
     lr_dirs = {k: Path(v) for k, v in lr_dirs.items()}
     exts = {e.lower() for e in exts}
 
-    items: list[tuple[Path, dict[str, Path]]] = []
+    items: list[tuple[Path, dict[str, list[Path]]]] = []
     for hr in sorted(hr_dir.iterdir()):
         if not hr.is_file() or hr.suffix.lower() not in exts:
             continue
-        lrs: dict[str, Path] = {}
+        lrs: dict[str, list[Path]] = {}
         for lr_type, lr_dir in lr_dirs.items():
-            candidate = lr_dir / f"{hr.stem}x{scale}.png"
-            if candidate.exists():
-                lrs[lr_type] = candidate
-            else:
-                matches = list(lr_dir.glob(f"{hr.stem}x{scale}.*"))
-                if matches:
-                    lrs[lr_type] = matches[0]
+            matches = _find_lr_files(lr_dir, hr.stem, scale)
+            if matches:
+                lrs[lr_type] = matches
         if lrs:
             items.append((hr, lrs))
     return items
@@ -185,12 +190,11 @@ class SRTrainDataset(Dataset):
 
 
 class SRMixTrainDataset(SRTrainDataset):
-    """Training dataset with random LR-variant selection per access.
+    """Training dataset with random LR type + file-variant selection.
 
-    ``groups`` is a list of ``(hr_path, {lr_type: lr_path})``.  Each HR is
-    exposed ``repeats`` times per epoch, and every access picks one of its
-    available LR variants at random.  The same HR can therefore be seen with
-    two different LR types within one epoch, but this is *not guaranteed*.
+    ``groups`` is a list of ``(hr_path, {lr_type: [lr_path, ...]})``.  Each HR
+    is exposed ``repeats`` times per epoch; every access randomly picks an LR
+    type and then one of its variant files.
     """
 
     def __init__(
@@ -219,7 +223,8 @@ class SRMixTrainDataset(SRTrainDataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         hr_path, lrs = self.groups[idx % len(self.groups)]
-        lr_path = lrs[self.rng.choice(tuple(lrs.keys()))]
+        lr_type = self.rng.choice(tuple(lrs.keys()))
+        lr_path = self.rng.choice(lrs[lr_type])
 
         hr = _load_rgb(hr_path)
         lr = _load_rgb(lr_path)

@@ -14,7 +14,7 @@ that has been reviewed is frozen; new tuning means a new version module.
 
 The package is intentionally batch-oriented: it writes pre-generated LR files
 for the normal paired training pipeline.  It does not expose an on-the-fly
-patch API.
+patch API.  The default version is ``v2``; ``v1`` remains frozen and available.
 """
 
 
@@ -26,13 +26,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import ops, v1
+from . import ops, v1, v2
 
 VERSIONS: dict[str, object] = {
     v1.VERSION: v1,
+    v2.VERSION: v2,
 }
 
-DEFAULT_VERSION = "v1"
+DEFAULT_VERSION = "v2"
 
 
 def list_versions() -> tuple[str, ...]:

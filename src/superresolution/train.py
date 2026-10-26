@@ -31,6 +31,7 @@ from .dataset import (
     collect_hr_items,
     lr_type_of,
 )
+from .degrade import list_versions as list_degrade_versions
 from .model import build_model, model_kwargs_for
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,9 @@ TRAIN_SOURCES = [
 VAL_SOURCES = [
     ("DIV2K/DIV2K_valid_HR", "DIV2K/DIV2K_valid_LR_{lr_type}/X{scale}", 1.0),
 ]
+
+# Pre-generated ESP32 LR types are versioned: esp32_v1, esp32_v2, ...
+ESP32_LR_TYPES = tuple(f"esp32_{v}" for v in list_degrade_versions())
 
 
 def _fmt(path: str, scale: int, lr_type: str) -> str:
@@ -81,8 +85,8 @@ def build_datasets(args: argparse.Namespace):
     val_types = train_types
     all_types = tuple(sorted(set(train_types) | set(val_types)))
 
-    train_groups: list[tuple[Path, dict[str, Path]]] = []
-    val_groups: list[tuple[Path, dict[str, Path]]] = []
+    train_groups: list[tuple[Path, dict[str, list[Path]]]] = []
+    val_groups: list[tuple[Path, dict[str, list[Path]]]] = []
 
     # Training sources (hold out a fraction of Flickr's HR images for validation).
     for hr_rel, lr_rel, val_frac in TRAIN_SOURCES:
@@ -112,7 +116,8 @@ def build_datasets(args: argparse.Namespace):
         for hr, lrs in groups:
             for lt in types:
                 if lt in lrs:
-                    pairs.append((hr, lrs[lt]))
+                    # Validation uses the first variant (v0) for comparability.
+                    pairs.append((hr, lrs[lt][0]))
         return pairs
 
     return train_groups, flatten(val_groups, val_types)
@@ -209,11 +214,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--lr-type",
         type=str,
         default="both",
-        choices=["bicubic", "unknown", "both", "esp32"],
+        choices=["bicubic", "unknown", "both", *ESP32_LR_TYPES],
         help=(
             "bicubic = clean downscale; unknown = realistic degradation; "
-            "both = mix bicubic and unknown; esp32 = pre-generated ESP32 LR "
-            "under DIV2K_train_LR_esp32 / Flickr2K_LR_esp32"
+            "both = mix bicubic and unknown; esp32_vN = pre-generated ESP32 LR "
+            "under DIV2K_train_LR_esp32_vN / Flickr2K_LR_esp32_vN"
         ),
     )
     p.add_argument("--patch-size", type=int, default=192, help="HR patch size")
