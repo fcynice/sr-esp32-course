@@ -18,9 +18,10 @@
   - 拖动线模式：两图叠放，用一条可拖动、可调角度的细线分割；线一侧是推理前，
     另一侧是推理后；可拖动线本身或中间的圆点移动位置。
   - 滚轮缩放、拖动画布平移；左右两栏同步。
-- HR 配对：如果选中的 LR 位于 DIV2K / Flickr2K 的已知 LR 目录（`bicubic` / `unknown` /
-  `esp32`），自动找到对应 HR，此时有 LR、HR、SR 三张图，可切换 `LR / SR`、
-  `SR / HR`、`LR / HR` 对比；LR 卡片/标签会显示来源类型（如 `esp32`）。
+- HR 配对：DIV2K / Flickr2K 下的 LR 目录自动识别，不再维护固定清单。只要目录位于
+  已知 split 下且包含 `X<scale>/<file>`，就会自动匹配同级 `<base>_HR`（推荐命名
+  `<base>_LR_<variant>`）；此时有 LR、HR、SR 三张图，可切换 `LR / SR`、`SR / HR`、
+  `LR / HR` 对比；LR 卡片/标签会显示来源类型（如 `esp32_v1/v0`）。
 - 有 HR 且尺寸一致时，计算并显示 SR vs HR 的 PSNR / SSIM。
 - 推理在后台任务中执行，页面轮询进度；大图自动分块，避免显存不足。
 - SR 结果保存到 `data/sr_infer/results/`，支持下载。
@@ -130,19 +131,49 @@ curl http://127.0.0.1:8001/api/jobs/<job_id>
 
 ## HR 配对规则
 
-只对以下目录做 LR -> HR 配对（`X2` / `X3` / `X4`）：
+DIV2K / Flickr2K 的 LR -> HR 配对是**自动**的，不再维护固定目录清单。
 
-| LR 目录 | HR 目录 |
+规则：
+
+1. 扫描根目录：`data/DIV2K`、`data/Flickr2K`；
+2. 目录名推荐为 `<base>_LR_<variant>`（也支持 `<base>_LR`）；已知 split 下也兼容
+   不带 `_LR` 的变体目录，如 `DIV2K_train_degraded_v3`；
+3. 该目录下存在 `X<scale>/<file>` 路径；
+4. 自动匹配同级 `<base>_HR` 目录（HR 体系保持固定）。
+
+例如：
+
+| LR 路径 | 自动匹配 HR |
 |---|---|
-| `data/DIV2K/DIV2K_train_LR_bicubic/X*` | `data/DIV2K/DIV2K_train_HR` |
-| `data/DIV2K/DIV2K_train_LR_unknown/X*` | `data/DIV2K/DIV2K_train_HR` |
-| `data/DIV2K/DIV2K_train_LR_esp32/X*` | `data/DIV2K/DIV2K_train_HR` |
-| `data/DIV2K/DIV2K_valid_LR_bicubic/X*` | `data/DIV2K/DIV2K_valid_HR` |
-| `data/DIV2K/DIV2K_valid_LR_unknown/X*` | `data/DIV2K/DIV2K_valid_HR` |
-| `data/DIV2K/DIV2K_valid_LR_esp32/X*` | `data/DIV2K/DIV2K_valid_HR` |
-| `data/Flickr2K/Flickr2K_LR_bicubic/X*` | `data/Flickr2K/Flickr2K_HR` |
-| `data/Flickr2K/Flickr2K_LR_unknown/X*` | `data/Flickr2K/Flickr2K_HR` |
-| `data/Flickr2K/Flickr2K_LR_esp32/X*` | `data/Flickr2K/Flickr2K_HR` |
+| `data/DIV2K/DIV2K_train_LR_*/X*` | `data/DIV2K/DIV2K_train_HR` |
+| `data/DIV2K/DIV2K_valid_LR_*/X*` | `data/DIV2K/DIV2K_valid_HR` |
+| `data/Flickr2K/Flickr2K_LR_*/X*` | `data/Flickr2K/Flickr2K_HR` |
+| `data/DIV2K/DIV2K_test_LR_*/X*`（未来） | `data/DIV2K/DIV2K_test_HR`（需存在） |
+
+因此新增退化版本无需改代码，例如：
+
+```text
+data/DIV2K/DIV2K_train_LR_v2/X4/0001x4.png
+data/DIV2K/DIV2K_train_LR_esp32_severity2/X4/0001x4.png
+data/Flickr2K/Flickr2K_LR_profileA/X4/000001x4.png
+```
+
+也支持在 `X<scale>` 前后继续加子目录，此时页面的 `lr_type` 会带上这些子目录名：
+
+```text
+data/DIV2K/DIV2K_train_LR_esp32_v1/X4/v0/0001x4.png
+  -> lr_type = esp32_v1/v0
+
+data/DIV2K/DIV2K_valid_LR_esp32_v2/X4/v1/0801x4.png
+  -> lr_type = esp32_v2/v1
+
+data/DIV2K/DIV2K_train_LR_esp32/profileA/X4/0001x4.png
+  -> lr_type = esp32/profileA
+```
+
+`X2` / `X3` / `X4` / `X8` 等任意 `X<scale>` 目录都会被识别，`X<scale>` 下面的
+`v0`、`v1` 等 profile 子目录也不需要改代码。已知 split 下即使目录名不含 `_LR`
+（例如 `DIV2K_train_degraded_v3`），只要包含 `X<scale>` 也会自动匹配。
 
 文件名去掉 LR 末尾的 `xN` 后去 HR 目录找同名文件：
 
@@ -151,7 +182,7 @@ curl http://127.0.0.1:8001/api/jobs/<job_id>
 - ESP32：`0801x4.png` -> `0801.jpeg`（与 bicubic/unknown 使用同一份 HR）
 
 其他目录（`data/大学教室`、`data/esp32_camera` 等）没有 HR，页面只显示 LR / SR。
-后续新增数据集时，在 `datasets.py` 的 `DATASET_MAPPINGS` 里加一行即可。
+新增 LR 版本时只要遵守上述目录命名和 `X<scale>` 结构即可自动生效。
 
 ## 推理与结果
 

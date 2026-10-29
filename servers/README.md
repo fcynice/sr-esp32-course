@@ -25,7 +25,7 @@ servers/
 | 服务 | 端口(默认) | 说明 | 文档 |
 |---|---|---|---|
 | [`esp32_capture_server`](./esp32_capture_server/) | `8000` | 接收 ESP32 摄像头 JPEG（经手机中转：Android App 或 Termux），保存到 `data/esp32_camera/` | [README](./esp32_capture_server/README.md) |
-| [`sr_infer_server`](./sr_infer_server/) | `8001` | 超分推理可视化：本地目录选图、选择 `runs/resNN` 的 best/last 权重、LR/SR/HR 并排与可旋转拖动线对比（支持 bicubic / unknown / esp32 LR） | [README](./sr_infer_server/README.md) |
+| [`sr_infer_server`](./sr_infer_server/) | `8001` | 超分推理可视化：本地目录选图、选择 `runs/resNN` 的 best/last 权重、LR/SR/HR 并排与可旋转拖动线对比（自动匹配 DIV2K/Flickr2K 所有 LR 变体及 `X*/vN` 子目录） | [README](./sr_infer_server/README.md) |
 | [`degrade_review_server`](./degrade_review_server/) | `8002` | ESP32 退化审查：按 profile 浏览模拟 LR、HR 对照、退化参数与真实 `data01` 参考图 | [README](./degrade_review_server/README.md) |
 
 端口分配时请避开已用端口，新增服务建议顺延（如 `8001`、`8002`）并在此表登记。

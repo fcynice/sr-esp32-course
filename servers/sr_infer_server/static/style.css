@@ -547,6 +547,9 @@ select:focus {
 
 .ref-card strong {
   display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   font-weight: 600;
 }
@@ -742,6 +745,9 @@ select:focus {
 .line-tag {
   position: absolute;
   z-index: 3;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: 4px 8px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 999px;
