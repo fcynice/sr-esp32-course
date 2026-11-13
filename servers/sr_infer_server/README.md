@@ -7,7 +7,15 @@
 服务端直接用该路径读取，避免复制和临时文件。
 
 > **运行前提**：`runs/`、`*.pth` 和 `data/` 都不在 Git 仓库里。fresh clone 后服务
-> 能启动，但 run 列表和默认目录可能为空；请先下载权重/数据，或自己训练一个 run。
+> 能启动，但 run 列表和默认目录可能为空。先下载权重：
+>
+> ```bash
+> .venv/bin/python scripts/fetch_weights.py
+> # 或只下主力
+> .venv/bin/python scripts/fetch_weights.py --only res03,res05,res08
+> ```
+>
+> 数据获取见 [`docs/DATASETS.md`](../../docs/DATASETS.md)。
 
 ## 功能
 
@@ -15,7 +23,7 @@
   `.png` / `.jpg` / `.jpeg`。
 - 模型选择：自动扫描 `runs/res*`，选择 run 后选择 `best.pth` 或 `last.pth`。
 - 训练信息：展示 `run_info.json` / `args.json` / `train_log.csv` 中的架构、训练倍数、
-  `bicubic` / `unknown`、通道数、残差块数、patch、batch、epoch、学习率、最优验证 PSNR 等。
+  `bicubic` / `unknown` / `esp32_vN`、通道数、残差块数、patch、batch、epoch、学习率、最优验证 PSNR 等。
 - 推理对比：
   - 左右并排模式：LR 与 SR 完整并排显示。
   - 拖动线模式：两图叠放，用一条可拖动、可调角度的细线分割；线一侧是推理前，
@@ -37,7 +45,7 @@ servers/sr_infer_server/
 ├── __main__.py          # python -m servers.sr_infer_server
 ├── config.py            # 路径、设备、分块、缩略图等配置
 ├── paths.py             # 允许目录校验 / 路径显示
-├── datasets.py          # 写死的 LR -> HR 数据集映射
+├── datasets.py          # 自动发现 DIV2K/Flickr2K 的 LR -> HR 配对
 ├── browse.py            # 目录浏览、图片信息、缩略图缓存
 ├── runs.py              # 扫描 runs/resNN 与训练参数
 ├── metrics.py           # PSNR / SSIM（基于 torch，无额外依赖）
@@ -62,6 +70,13 @@ uv run uvicorn servers.sr_infer_server.main:app --host 127.0.0.1 --port 8001
 ```
 
 打开 <http://127.0.0.1:8001/>，API 文档在 <http://127.0.0.1:8001/docs>。
+
+启动后先自检：
+
+```bash
+curl http://127.0.0.1:8001/api/health
+# 返回 GPU、run 数量、默认浏览目录等
+```
 
 常用参数：
 
@@ -97,7 +112,8 @@ uv run python -m servers.sr_infer_server \
 | `SR_INFER_THUMB_SIZE` | `320` | 缩略图长边像素 |
 
 允许浏览的根目录默认只有项目根；如需浏览其他图片目录，可用
-`SR_INFER_ALLOWED_ROOTS=/path/a:/path/b` 或重复传 `--allowed-root`。
+`SR_INFER_ALLOWED_ROOTS=/path/a:/path/b`（Linux/macOS 用 `:`，Windows 用 `;`）
+或重复传 `--allowed-root`。
 出于安全考虑，接口会拒绝根目录之外的路径。
 
 ## 接口
@@ -206,3 +222,15 @@ data/DIV2K/DIV2K_train_LR_esp32/profileA/X4/0001x4.png
   并评估目录浏览接口的暴露风险。
 - 目录浏览接口只允许访问配置的允许根目录；不要把它直接暴露到公网。
 - 图片格式仅支持 `.png` / `.jpg` / `.jpeg`。
+
+
+## 常见问题
+
+| 现象 | 原因 / 解决 |
+|---|---|
+| run 列表为空 | `runs/` 没有权重；先 `scripts/fetch_weights.py`，或自己训练一个 run |
+| 页面目录为空 | `data/` 没下载，或 `--default-browse` 指向了不存在的目录 |
+| `403` / 路径被拒绝 | 路径不在 `--allowed-root` 内；用 `SR_INFER_ALLOWED_ROOTS` 或重复 `--allowed-root` 添加 |
+| CUDA OOM | 降低 `--auto-tile`（如 256），或先缩小输入图；也可以换更小的模型/权重 |
+| 端口被占用 | `--port 8011` 换一个端口 |
+| 想局域网访问 | `--host 0.0.0.0`，但目录浏览接口会暴露给同网段，注意安全 |
