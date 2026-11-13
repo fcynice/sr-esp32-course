@@ -404,8 +404,14 @@ run 做迁移学习或切换到新的 LR 类型：
 
 ## 推理
 
-先从 [`docs/RESULTS.md`](docs/RESULTS.md) 下载权重，放到 `runs/resNN/`（或直接给
-`.pth` 路径）。单张图片：
+权重不在 Git 里。一条命令从 GitHub Releases 下载并放到 `runs/res03` / `runs/res08`：
+
+```bash
+.venv/bin/python scripts/fetch_weights.py
+```
+
+也可以手动从 [`docs/RESULTS.md`](docs/RESULTS.md) 下载 `.pth`，放到 `runs/resNN/`
+（或直接给 `.pth` 路径）。单张图片：
 
 ```bash
 .venv/bin/python -m superresolution.infer \
@@ -461,7 +467,7 @@ run 做迁移学习或切换到新的 LR 类型：
 | DIV2K + Flickr2K | `data/` | ~30 GB | 否 | [`docs/DATASETS.md`](docs/DATASETS.md) |
 | ESP32 v1/v2 LR | `data/*/…_LR_esp32_vN/` | ~0.7 / 1.5 GB | 否 | 运行 degrade CLI |
 | v1/v2 manifest | `docs/manifests/` | ~100 KB | **是** | 仓库内 |
-| 权重 `.pth` | `runs/resNN/` | 43–129 MB/个 | 否 | GitHub Releases（见 RESULTS） |
+| 权重 `.pth` | `runs/resNN/` | Release 版 43 MB/个 | 否 | `scripts/fetch_weights.py` |
 | 训练日志/参数 | `experiments/resNN/` | ~216 KB | **是** | 仓库内 |
 | SR / 退化对比图 | `docs/images/` | ~280 KB | **是** | 仓库内 |
 
@@ -501,6 +507,8 @@ scripts/
 ├── download_fast.py / download_parallel.py
 ├── eval_baseline.py   # bicubic 基线
 ├── smoke_test.py      # 无数据自检
+├── fetch_weights.py   # 从 GitHub Releases 下载权重
+├── export_weights.py  # 导出推理版权重（去掉 optimizer）
 └── migrate_runs.py    # 旧 runs 目录迁移
 crawl.py / baidu_image_scraper.py  # 早期图片采集脚本（可选，不参与训练）
 ```

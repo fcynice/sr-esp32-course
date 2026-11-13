@@ -150,8 +150,14 @@ data/Flickr2K/Flickr2K_LR_esp32_v2/X4/v0/  (v1/ 同理)
 ## 5. 权重与训练日志
 
 - `.pth` 不提交（`res04` 起约 129 MB/个，超过 GitHub 100 MB 单文件限制）；
-- 权重通过 GitHub Releases / HuggingFace 分发，清单和 PSNR 见
-  [`docs/RESULTS.md`](RESULTS.md)；
+- 权重通过 GitHub Releases 分发，Release asset 是去掉 optimizer 的推理版（约 43 MB）：
+
+  ```bash
+  .venv/bin/python scripts/fetch_weights.py
+  ```
+
+  清单、SHA-256 和 PSNR 见 [`docs/RESULTS.md`](RESULTS.md)；
+- 维护者可用 `scripts/export_weights.py` 从 `runs/resNN/best.pth` 导出 Release 文件；
 - 每个 run 的 `args.json` / `run_info.json` / `train_log.csv` / `last_val.txt`
   已复制到 [`experiments/`](../experiments/)，用于复现实验配置。
 

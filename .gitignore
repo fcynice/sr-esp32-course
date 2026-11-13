@@ -19,6 +19,9 @@ runs/
 *.pth
 
 
+# Release assets are uploaded, never committed
+release_assets/
+
 # Local-only ESP32 capture chain (author's personal task; not needed by teammates)
 for_infer/
 phone/
