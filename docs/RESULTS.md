@@ -69,6 +69,9 @@ v1 的残影/高光 bloom 更重，v2 削弱了 bloom/ghosting。
 
   ```bash
   .venv/bin/python scripts/fetch_weights.py
+
+  # 本机已有同名 checkpoint 时默认跳过；只想验证 Release 可下到临时目录
+  .venv/bin/python scripts/fetch_weights.py --dest /tmp/released_weights
   ```
 
 ## 4. 复现命令

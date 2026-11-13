@@ -133,8 +133,9 @@ def main() -> None:
             actual = sha256(target)
             if actual == expected_sha:
                 print(f"skip {target} (already downloaded)")
-                continue
-            print(f"warning: {target} exists but checksum differs; use --force to replace")
+            else:
+                print(f"skip {target} (exists, checksum differs; use --force to replace)")
+            continue
 
         url = f"{BASE_URL}/{name}"
         print(f"download {url}")
