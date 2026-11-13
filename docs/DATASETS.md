@@ -150,10 +150,12 @@ data/Flickr2K/Flickr2K_LR_esp32_v2/X4/v0/  (v1/ 同理)
 ## 5. 权重与训练日志
 
 - `.pth` 不提交（`res04` 起约 129 MB/个，超过 GitHub 100 MB 单文件限制）；
-- 权重通过 GitHub Releases 分发，Release asset 是去掉 optimizer 的推理版（约 43 MB）：
+- 权重通过 GitHub Releases 分发，Release asset 是去掉 optimizer 的推理版
+  （ESPCN 0.15 MB / EDSR 43 MB，共 8 个 run）：
 
   ```bash
-  .venv/bin/python scripts/fetch_weights.py
+  .venv/bin/python scripts/fetch_weights.py                 # 全部 8 个
+  .venv/bin/python scripts/fetch_weights.py --only res05    # 只下 res05
   ```
 
   清单、SHA-256 和 PSNR 见 [`docs/RESULTS.md`](RESULTS.md)；

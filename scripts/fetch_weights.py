@@ -2,12 +2,13 @@
 """Download the released X4 checkpoints into ``runs/resNN/best.pth``.
 
 Weights are published as GitHub Release assets (not committed to Git).  This
-script downloads the two inference-only checkpoints, verifies their SHA-256 and
-places them where ``superresolution.infer`` / the servers expect them.
+script downloads the eight inference-only checkpoints, verifies their SHA-256
+and places them where ``superresolution.infer`` / the servers expect them.
 
 Usage::
 
     .venv/bin/python scripts/fetch_weights.py
+    .venv/bin/python scripts/fetch_weights.py --only res03,res05,res08
     .venv/bin/python scripts/fetch_weights.py --dest /tmp/runs --force
 
 If the release has not been published yet, the GitHub URL returns 404.
@@ -30,10 +31,40 @@ BASE_URL = f"https://github.com/{REPO}/releases/download/{TAG}"
 
 # asset name -> (target run directory, exact size, sha256)
 ASSETS: dict[str, tuple[str, int, str]] = {
+    "espcn_x4_unknown.pth": (
+        "res01",
+        152385,
+        "3b855cda1d804c7ee1e4446e80853b9aa33bf93ea3669a22cd8a0b4da0d7c4da",
+    ),
+    "espcn_x4_bicubic.pth": (
+        "res02",
+        152385,
+        "bc85c05ccb90cd976971bc983f64378081e7b474359a48d0c4e99d63b5cfd472",
+    ),
     "edsr_x4_bicubic.pth": (
         "res03",
         43171051,
         "2fa46dc547bccf5439ce072d1c653916e4d6af88d32ba769e1820e5c6fb0cc7b",
+    ),
+    "edsr_x4_unknown.pth": (
+        "res04",
+        43171051,
+        "2c6dcdad055e60bb5a1c0aafef4fb6e12dafdd489c11e07fd7ec505847d80050",
+    ),
+    "edsr_x4_both.pth": (
+        "res05",
+        43170619,
+        "f34fbfcb8f28117fc464cff6a54b896bde04173db4443d0164593909e021bdbc",
+    ),
+    "edsr_x4_esp32_legacy_res06.pth": (
+        "res06",
+        43172827,
+        "2e85e6dbbfdbe97a056af181a21d8e46f88ee781224422b7658bc675447a2fef",
+    ),
+    "edsr_x4_esp32_v1_legacy_res07.pth": (
+        "res07",
+        43173195,
+        "f8fc86bcb913e11eb8fa9995aa029b7b2087f95d61adc8f01bb29d3d55a31eb1",
     ),
     "edsr_x4_esp32_v2.pth": (
         "res08",
@@ -118,6 +149,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Download X4 checkpoints from GitHub Releases")
     p.add_argument("--dest", default="runs", help="runs directory (default: runs)")
     p.add_argument("--force", action="store_true", help="re-download even if the file exists")
+    p.add_argument(
+        "--only",
+        default="",
+        help="comma-separated runs to download, e.g. res03,res05,res08 (default: all)",
+    )
     p.add_argument("--list", action="store_true", help="list assets and exit")
     args = p.parse_args()
 
@@ -127,7 +163,14 @@ def main() -> None:
         return
 
     dest_root = Path(args.dest)
+    only = {item.strip() for item in args.only.split(",") if item.strip()}
+    unknown = only - {run for run, _, _ in ASSETS.values()}
+    if unknown:
+        raise SystemExit(f"unknown run(s) in --only: {sorted(unknown)}")
+
     for name, (run, size, expected_sha) in ASSETS.items():
+        if only and run not in only:
+            continue
         target = dest_root / run / "best.pth"
         if target.exists() and not args.force:
             actual = sha256(target)

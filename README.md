@@ -404,10 +404,13 @@ run 做迁移学习或切换到新的 LR 类型：
 
 ## 推理
 
-权重不在 Git 里。一条命令从 GitHub Releases 下载并放到 `runs/res03` / `runs/res08`：
+权重不在 Git 里。一条命令从 GitHub Releases 下载全部 8 个 run 到 `runs/resNN/best.pth`：
 
 ```bash
 .venv/bin/python scripts/fetch_weights.py
+
+# 只下载主力：res03（bicubic）/ res05（both，后续真实退化训练基础）/ res08（esp32_v2）
+.venv/bin/python scripts/fetch_weights.py --only res03,res05,res08
 ```
 
 也可以手动从 [`docs/RESULTS.md`](docs/RESULTS.md) 下载 `.pth`，放到 `runs/resNN/`
@@ -467,7 +470,7 @@ run 做迁移学习或切换到新的 LR 类型：
 | DIV2K + Flickr2K | `data/` | ~30 GB | 否 | [`docs/DATASETS.md`](docs/DATASETS.md) |
 | ESP32 v1/v2 LR | `data/*/…_LR_esp32_vN/` | ~0.7 / 1.5 GB | 否 | 运行 degrade CLI |
 | v1/v2 manifest | `docs/manifests/` | ~100 KB | **是** | 仓库内 |
-| 权重 `.pth` | `runs/resNN/` | Release 版 43 MB/个 | 否 | `scripts/fetch_weights.py` |
+| 权重 `.pth` | `runs/resNN/` | Release 版 0.15–43 MB/个 | 否 | `scripts/fetch_weights.py` |
 | 训练日志/参数 | `experiments/resNN/` | ~216 KB | **是** | 仓库内 |
 | SR / 退化对比图 | `docs/images/` | ~280 KB | **是** | 仓库内 |
 

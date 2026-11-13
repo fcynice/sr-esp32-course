@@ -58,17 +58,31 @@ v1 的残影/高光 bloom 更重，v2 削弱了 bloom/ghosting。
   `res06` 的 `args.json` 还包含已删除的 `degrade_*` 参数。**用当前代码不能
   直接 `--resume` 或复现**，只作为历史记录保留。
 - `res07` 实际读取的是 v1 数据；表中按 v1 展示。
-- 权重不在 Git 仓库中。Release asset 是去掉 optimizer/scheduler 的推理版，约 **43 MB**：
+- 权重不在 Git 仓库中。Release asset 是去掉 optimizer/scheduler 的推理版：
+  EDSR 约 **43 MB/个**，ESPCN 约 **0.15 MB/个**。
 
-  | 文件 | 对应 run | 大小 | SHA-256 |
+  | 文件 | run | 大小 | SHA-256（前缀） |
   |---|---|---:|---|
+  | [`espcn_x4_unknown.pth`](https://github.com/fcynice/sr-esp32-course/releases/download/weights-x4-v1/espcn_x4_unknown.pth) | res01 | 0.15 MB | `3b855cda…` |
+  | [`espcn_x4_bicubic.pth`](https://github.com/fcynice/sr-esp32-course/releases/download/weights-x4-v1/espcn_x4_bicubic.pth) | res02 | 0.15 MB | `bc85c05c…` |
   | [`edsr_x4_bicubic.pth`](https://github.com/fcynice/sr-esp32-course/releases/download/weights-x4-v1/edsr_x4_bicubic.pth) | res03 | 43.2 MB | `2fa46dc5…` |
+  | [`edsr_x4_unknown.pth`](https://github.com/fcynice/sr-esp32-course/releases/download/weights-x4-v1/edsr_x4_unknown.pth) | res04 | 43.2 MB | `2c6dcdad…` |
+  | [`edsr_x4_both.pth`](https://github.com/fcynice/sr-esp32-course/releases/download/weights-x4-v1/edsr_x4_both.pth) | res05 | 43.2 MB | `f34fbfcb…` |
+  | [`edsr_x4_esp32_legacy_res06.pth`](https://github.com/fcynice/sr-esp32-course/releases/download/weights-x4-v1/edsr_x4_esp32_legacy_res06.pth) | res06 | 43.2 MB | `2e85e6db…` |
+  | [`edsr_x4_esp32_v1_legacy_res07.pth`](https://github.com/fcynice/sr-esp32-course/releases/download/weights-x4-v1/edsr_x4_esp32_v1_legacy_res07.pth) | res07 | 43.2 MB | `f8fc86bc…` |
   | [`edsr_x4_esp32_v2.pth`](https://github.com/fcynice/sr-esp32-course/releases/download/weights-x4-v1/edsr_x4_esp32_v2.pth) | res08 | 43.2 MB | `a5724f75…` |
 
-  一条命令下载并放到 `runs/res03/best.pth`、`runs/res08/best.pth`：
+  > **res05 是后续真实退化训练的初始化基础**：`--init-from runs/res05/best.pth`
+  > 只加载模型权重，Release 里的 43 MB 推理版就够用。
+
+  下载到 `runs/resNN/best.pth`（脚本会校验 SHA-256）：
 
   ```bash
+  # 全部 8 个（约 258 MB）
   .venv/bin/python scripts/fetch_weights.py
+
+  # 只下载主力：res03 / res05 / res08
+  .venv/bin/python scripts/fetch_weights.py --only res03,res05,res08
 
   # 本机已有同名 checkpoint 时默认跳过；只想验证 Release 可下到临时目录
   .venv/bin/python scripts/fetch_weights.py --dest /tmp/released_weights
@@ -112,27 +126,27 @@ v1 的残影/高光 bloom 更重，v2 削弱了 bloom/ghosting。
 ## 6. 发布权重（维护者）
 
 `.pth` 不进 Git，推荐用 GitHub Releases（单文件上限 2 GB）。先导出推理版（去掉
-optimizer，129 MB → 43 MB）：
+optimizer，129 MB → 43 MB；8 个 run 全部导出）：
 
 ```bash
 .venv/bin/python scripts/export_weights.py
-# 输出 release_assets/edsr_x4_bicubic.pth 和 release_assets/edsr_x4_esp32_v2.pth
+# 输出 release_assets/*.pth（espcn 0.15 MB / edsr 43 MB）
 ```
 
 然后创建 Release（tag 必须是 `weights-x4-v1`，否则下载链接会变）：
 
 ```bash
 gh release create weights-x4-v1 \
-  release_assets/edsr_x4_bicubic.pth \
-  release_assets/edsr_x4_esp32_v2.pth \
+  release_assets/*.pth \
   --target master \
-  --title "X4 checkpoints (EDSR)" \
-  --notes "bicubic 28.61 dB (res03); esp32_v2 19.56 dB (res08); see docs/RESULTS.md"
+  --title "X4 checkpoints (ESPCN / EDSR)" \
+  --notes-file /tmp/sr-release/RELEASE_DESCRIPTION.md
 ```
 
 没有 `gh` 就用网页：Releases → Create a new release → tag `weights-x4-v1` →
-拖入上面两个文件 → Publish。发布后用下面的命令验证：
+把 `release_assets/*.pth` 全部拖进去，正文粘贴
+`/tmp/sr-release/RELEASE_DESCRIPTION.md` → Publish。发布后验证：
 
 ```bash
-.venv/bin/python scripts/fetch_weights.py --force
+.venv/bin/python scripts/fetch_weights.py --dest /tmp/released_weights
 ```

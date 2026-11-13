@@ -4,7 +4,8 @@
 ``runs/resNN/best.pth`` stores the model, optimizer, scheduler and AMP scaler.
 For inference we only need ``model`` / ``model_name`` / ``model_kwargs`` (plus
 ``args`` / ``epoch`` / ``psnr`` for metadata), so this script strips the
-optimizer state and writes ~43 MB files with release-friendly names.
+optimizer state and writes inference-only files with release-friendly names
+(EDSR ~43 MB, ESPCN ~0.15 MB).  By default all 8 runs are exported.
 
 Usage::
 
@@ -26,7 +27,13 @@ import torch
 
 # Default set used by docs/RESULTS.md and scripts/fetch_weights.py.
 DEFAULT_EXPORTS = (
+    ("res01", "espcn_x4_unknown.pth"),
+    ("res02", "espcn_x4_bicubic.pth"),
     ("res03", "edsr_x4_bicubic.pth"),
+    ("res04", "edsr_x4_unknown.pth"),
+    ("res05", "edsr_x4_both.pth"),
+    ("res06", "edsr_x4_esp32_legacy_res06.pth"),
+    ("res07", "edsr_x4_esp32_v1_legacy_res07.pth"),
     ("res08", "edsr_x4_esp32_v2.pth"),
 )
 
@@ -66,7 +73,7 @@ def main() -> None:
         action="append",
         metavar="RUN:NAME",
         help="export one run (e.g. res03:edsr_x4_bicubic); repeatable. "
-        "Default: res03 + res08.",
+        "Default: all 8 runs (res01..res08).",
     )
     args = p.parse_args()
 
