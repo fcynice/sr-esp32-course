@@ -9,10 +9,14 @@
 服务只读取审查目录，不会修改图片，也不参与训练。当前训练读取由
 `superresolution.degrade` 离线生成的 ESP32 LR 数据集。
 
+> **运行前提**：真实参考图 `data/esp32_camera/data01` 和历史 review session
+> `data/esp32_degrade_review/` 都在作者本地，**不随仓库分发**。fresh clone 后服务
+> 可以启动，但 session / 参考图列表为空；这不影响训练和 LR 数据生成。
+
 ## 启动
 
 ```bash
-cd /home/tomato/projects/python_project/superresolution
+cd /path/to/superresolution
 uv run python -m servers.degrade_review_server --host 127.0.0.1 --port 8002
 ```
 

@@ -1,0 +1,13 @@
+{
+  "index": 5,
+  "timestamp": "2026-10-19T10:39:09",
+  "lr_type": "both",
+  "scale": 4,
+  "model": "edsr",
+  "model_kwargs": {
+    "scale": 4,
+    "in_channels": 3,
+    "channels": 128,
+    "n_blocks": 32
+  }
+}

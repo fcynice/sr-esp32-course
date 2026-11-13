@@ -1,0 +1,16 @@
+{
+  "index": 8,
+  "timestamp": "2026-10-26T19:10:04",
+  "lr_type": "esp32_v2",
+  "scale": 4,
+  "model": "edsr",
+  "model_kwargs": {
+    "scale": 4,
+    "in_channels": 3,
+    "channels": 128,
+    "n_blocks": 32
+  },
+  "init_from": "runs/res05/best.pth",
+  "init_epoch": 110,
+  "init_psnr": 28.06791112989256
+}

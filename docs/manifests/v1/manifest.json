@@ -1,0 +1,64 @@
+{
+  "created": "2026-10-24T15:30:20",
+  "version": "v1",
+  "fingerprint": "555a9e08e8de9a57cc49b50564ddc8211cc8bff72bf972318b4150190c05ee9a",
+  "scale": 4,
+  "severity": 1.0,
+  "seed": 42,
+  "profiles": [
+    "day_soft",
+    "green_indoor",
+    "lowlight_noise",
+    "motion_blur",
+    "ghosting",
+    "defocus",
+    "overexposed",
+    "jpeg_hard",
+    "mixed_hard"
+  ],
+  "profile_mode": "auto",
+  "output_format": "png",
+  "counts": {
+    "div2k_train": {
+      "total": 800,
+      "queued": 800,
+      "skipped": 0,
+      "files": 800
+    },
+    "div2k_valid": {
+      "total": 100,
+      "queued": 100,
+      "skipped": 0,
+      "files": 100
+    },
+    "flickr2k": {
+      "total": 2650,
+      "queued": 2650,
+      "skipped": 0,
+      "files": 2650
+    }
+  },
+  "generated": 3550,
+  "errors": 0,
+  "outputs": {
+    "div2k_train": {
+      "root": "DIV2K/DIV2K_train_LR_esp32_v1/X4",
+      "variants": [
+        "v0"
+      ]
+    },
+    "div2k_valid": {
+      "root": "DIV2K/DIV2K_valid_LR_esp32_v1/X4",
+      "variants": [
+        "v0"
+      ]
+    },
+    "flickr2k": {
+      "root": "Flickr2K/Flickr2K_LR_esp32_v1/X4",
+      "variants": [
+        "v0"
+      ]
+    }
+  },
+  "variants": 1
+}

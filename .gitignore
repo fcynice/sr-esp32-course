@@ -10,6 +10,7 @@ wheels/
 .venv
 
 # Datasets and local media (large, not for version control)
+# Get them via docs/DATASETS.md or ask the project owner.
 data/
 esp_video/
 
@@ -18,6 +19,7 @@ runs/
 *.pth
 
 
+# Local-only ESP32 capture chain (author's personal task; not needed by teammates)
 for_infer/
 phone/
 servers/esp32_capture_server/

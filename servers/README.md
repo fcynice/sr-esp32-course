@@ -18,25 +18,38 @@ servers/
     └── README.md                # 该服务自己的使用文档
 ```
 
-命名全部用小写 + 下划线（如 `esp32_capture_server`），与目录名保持一致。
+命名全部用小写 + 下划线（如 `sr_infer_server`），与目录名保持一致。
 
 ## 服务列表
 
 | 服务 | 端口(默认) | 说明 | 文档 |
 |---|---|---|---|
-| [`esp32_capture_server`](./esp32_capture_server/) | `8000` | 接收 ESP32 摄像头 JPEG（经手机中转：Android App 或 Termux），保存到 `data/esp32_camera/` | [README](./esp32_capture_server/README.md) |
 | [`sr_infer_server`](./sr_infer_server/) | `8001` | 超分推理可视化：本地目录选图、选择 `runs/resNN` 的 best/last 权重、LR/SR/HR 并排与可旋转拖动线对比（自动匹配 DIV2K/Flickr2K 所有 LR 变体及 `X*/vN` 子目录） | [README](./sr_infer_server/README.md) |
 | [`degrade_review_server`](./degrade_review_server/) | `8002` | ESP32 退化审查：按 profile 浏览模拟 LR、HR 对照、退化参数与真实 `data01` 参考图 | [README](./degrade_review_server/README.md) |
 
-端口分配时请避开已用端口，新增服务建议顺延（如 `8001`、`8002`）并在此表登记。
+端口分配时请避开已用端口，新增服务建议顺延并在此表登记。
+
+### 运行前提
+
+- `sr_infer_server`：需要 `runs/` 下有可用权重（`runs/` 和 `*.pth` 不进 Git）；
+  fresh clone 时服务能启动，但 run 列表为空。
+- `degrade_review_server`：默认读取 `data/esp32_camera/data01` 和
+  `data/esp32_degrade_review/`，这两部分**不在仓库**；没有本地数据时列表为空。
+
+### 本地专用（不随仓库提供）
+
+`esp32_capture_server`（端口 8000）和 `phone/esp32_relay_android/` 是作者本地的
+ESP32 摄像头采集链路，用于采集真实参考图；它们不影响训练、推理和退化数据生成。
+队友不需要运行或改动这部分。`servers/esp32_capture_server/` 已被 `.gitignore` 排除，
+因此本目录不再链接它。
 
 ## 环境与依赖
 
 统一使用项目根目录的 `uv` 虚拟环境，共享 `pyproject.toml`。
 
 ```bash
-cd /home/tomato/projects/python_project/superresolution
-uv sync                 # 安装/同步全部依赖
+cd /path/to/superresolution   # 仓库根目录
+uv sync                       # 安装/同步全部依赖
 ```
 
 新增依赖优先用 `uv add <pkg>` 写入 `pyproject.toml`；`<server_name>/requirements.txt`
@@ -59,8 +72,8 @@ uv run uvicorn servers.<server_name>.main:app --host 0.0.0.0 --port <port>
 后台常驻（本机 tmux / nohup）：
 
 ```bash
-uv run nohup python -m servers.esp32_capture_server --port 8000 \
-  > runs/esp32_capture_server.log 2>&1 &
+uv run nohup python -m servers.sr_infer_server --port 8001 \
+  > runs/sr_infer_server.log 2>&1 &
 ```
 
 ## 新增一个 server 的步骤
@@ -85,4 +98,6 @@ uv run nohup python -m servers.esp32_capture_server --port 8000 \
 ## 相关文档
 
 - 项目总说明：[../README.md](../README.md)
-- ESP32 采集链路：[./esp32_capture_server/README.md](./esp32_capture_server/README.md)
+- 数据获取：[../docs/DATASETS.md](../docs/DATASETS.md)
+- 实验结果：[../docs/RESULTS.md](../docs/RESULTS.md)
+- 历史 ESP32 采集链路：作者本地保留，不随仓库提供

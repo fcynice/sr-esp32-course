@@ -1,0 +1,13 @@
+{
+  "index": 3,
+  "timestamp": "2026-10-17T12:47:26",
+  "lr_type": "bicubic",
+  "scale": 4,
+  "model": "edsr",
+  "model_kwargs": {
+    "scale": 4,
+    "in_channels": 3,
+    "channels": 128,
+    "n_blocks": 32
+  }
+}

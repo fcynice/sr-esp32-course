@@ -6,6 +6,9 @@
 设计上**不做文件上传**：服务端和图片在同一台机器上，页面通过目录浏览器选择图片，
 服务端直接用该路径读取，避免复制和临时文件。
 
+> **运行前提**：`runs/`、`*.pth` 和 `data/` 都不在 Git 仓库里。fresh clone 后服务
+> 能启动，但 run 列表和默认目录可能为空；请先下载权重/数据，或自己训练一个 run。
+
 ## 功能
 
 - 服务端目录浏览：面包屑、快捷入口、子目录、当前目录图片缩略图；**不递归**，只显示
@@ -49,7 +52,7 @@ servers/sr_infer_server/
 ## 启动
 
 ```bash
-cd /home/tomato/projects/python_project/superresolution
+cd /path/to/superresolution
 
 # 推荐：模块入口，默认 127.0.0.1:8001
 uv run python -m servers.sr_infer_server

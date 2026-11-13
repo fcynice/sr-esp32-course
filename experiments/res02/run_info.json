@@ -1,0 +1,7 @@
+{
+  "index": 2,
+  "timestamp": "2026-10-14T21:02:22",
+  "lr_type": "bicubic",
+  "scale": 4,
+  "model": "espcn"
+}

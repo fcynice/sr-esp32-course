@@ -1,0 +1,16 @@
+{
+  "index": 6,
+  "timestamp": "2026-10-20T18:36:29",
+  "lr_type": "esp32",
+  "scale": 4,
+  "model": "edsr",
+  "model_kwargs": {
+    "scale": 4,
+    "in_channels": 3,
+    "channels": 128,
+    "n_blocks": 32
+  },
+  "degrade_version": "v1",
+  "degrade_fingerprint": "555a9e08e8de9a57cc49b50564ddc8211cc8bff72bf972318b4150190c05ee9a",
+  "degrade_profiles": null
+}

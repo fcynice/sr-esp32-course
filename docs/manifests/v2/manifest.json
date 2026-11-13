@@ -1,0 +1,67 @@
+{
+  "created": "2026-10-26T10:47:06",
+  "version": "v2",
+  "fingerprint": "4bee71cbf19db7a48ddc28232d096c311833a29962684187afbc0b78ceb4f28c",
+  "scale": 4,
+  "severity": 1.0,
+  "seed": 42,
+  "profiles": [
+    "day_soft",
+    "green_indoor",
+    "lowlight_noise",
+    "motion_blur",
+    "ghosting",
+    "defocus",
+    "overexposed",
+    "jpeg_hard",
+    "mixed_hard"
+  ],
+  "profile_mode": "auto",
+  "output_format": "png",
+  "variants": 2,
+  "counts": {
+    "div2k_train": {
+      "total": 1600,
+      "files": 800,
+      "queued": 1600,
+      "skipped": 0
+    },
+    "div2k_valid": {
+      "total": 200,
+      "files": 100,
+      "queued": 200,
+      "skipped": 0
+    },
+    "flickr2k": {
+      "total": 5300,
+      "files": 2650,
+      "queued": 5300,
+      "skipped": 0
+    }
+  },
+  "generated": 7100,
+  "errors": 0,
+  "outputs": {
+    "div2k_train": {
+      "root": "DIV2K/DIV2K_train_LR_esp32_v2/X4",
+      "variants": [
+        "v0",
+        "v1"
+      ]
+    },
+    "div2k_valid": {
+      "root": "DIV2K/DIV2K_valid_LR_esp32_v2/X4",
+      "variants": [
+        "v0",
+        "v1"
+      ]
+    },
+    "flickr2k": {
+      "root": "Flickr2K/Flickr2K_LR_esp32_v2/X4",
+      "variants": [
+        "v0",
+        "v1"
+      ]
+    }
+  }
+}
